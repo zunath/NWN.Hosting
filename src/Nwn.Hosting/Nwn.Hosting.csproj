@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Nwn.Hosting</RootNamespace>
+    <Description>A permanent NWNX DotNET host that hot reloads gameplay assemblies: native bootstrap and closure routing, the engine-thread queue, a reload core that loads each generation into a collectible AssemblyLoadContext, and development reload signal handling.</Description>
+    <IsPackable>true</IsPackable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="NWN.Core" Version="8193.37.7" />
+    <PackageReference Include="NWN.Native" Version="8193.37.8" />
+    <PackageReference Include="NWNX.NET" Version="1.0.3" />
+    <ProjectReference Include="../Nwn.Hosting.Contracts/Nwn.Hosting.Contracts.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Lets Nwn.Hosting.Tests drive the load context's name resolution, the native initialization
+         sequence and the periodic timer seam without a running server. -->
+    <InternalsVisibleTo Include="Nwn.Hosting.Tests" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="/" />
+    <None Include="../../licenses/NWN-Hosting-MIT.txt" Pack="true" PackagePath="licenses/" />
+  </ItemGroup>
+</Project>

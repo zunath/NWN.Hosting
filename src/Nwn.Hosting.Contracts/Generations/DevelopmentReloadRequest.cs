@@ -7,8 +7,14 @@ public sealed record DevelopmentReloadRequest(
     [property: JsonRequired] Guid GenerationId)
 {
     public const string GenerationsDirectoryName = "generations";
-    public const string GameAssemblyFileName = "Xenomech.Game.dll";
 
-    public string GetAssemblyRelativePath() =>
-        Path.Combine(GenerationsDirectoryName, GenerationId.ToString("N"), GameAssemblyFileName);
+    /// <summary>
+    /// The candidate's gameplay assembly relative to the generation root. The consumer names its own
+    /// gameplay assembly file; the request carries only the generation identity.
+    /// </summary>
+    public string GetAssemblyRelativePath(string gameAssemblyFileName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(gameAssemblyFileName);
+        return Path.Combine(GenerationsDirectoryName, GenerationId.ToString("N"), gameAssemblyFileName);
+    }
 }

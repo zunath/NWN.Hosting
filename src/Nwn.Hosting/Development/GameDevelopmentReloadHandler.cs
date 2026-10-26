@@ -7,6 +7,7 @@ namespace Nwn.Hosting.Development;
 public sealed class GameDevelopmentReloadHandler(
     string signalPath,
     string legacyAssemblyPath,
+    string gameAssemblyFileName,
     string? generationRoot,
     string? resultPath,
     Func<string, CancellationToken, Task<ReloadReport>> reloadAsync,
@@ -30,7 +31,7 @@ public sealed class GameDevelopmentReloadHandler(
         {
             try
             {
-                var report = await reloadAsync(Path.Combine(Path.GetFullPath(generationRoot), request.GetAssemblyRelativePath()), cancellationToken).ConfigureAwait(false);
+                var report = await reloadAsync(Path.Combine(Path.GetFullPath(generationRoot), request.GetAssemblyRelativePath(gameAssemblyFileName)), cancellationToken).ConfigureAwait(false);
                 var status = report.Outcome switch
                 {
                     ReloadOutcome.Applied => DevelopmentReloadStatus.Applied,

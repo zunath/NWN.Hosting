@@ -9,6 +9,8 @@ namespace Nwn.Hosting.Tests.Development;
 [TestCategory("Unit")]
 public sealed class GameDevelopmentReloadHandlerTests
 {
+    private const string GameAssembly = "Fixture.Game.dll";
+
     private string _root = string.Empty;
 
     [TestInitialize]
@@ -33,12 +35,12 @@ public sealed class GameDevelopmentReloadHandlerTests
         var request = new DevelopmentReloadRequest(1, id);
         await DevelopmentReloadFiles.WriteRequestAsync(signal, request, CancellationToken.None);
         string? observedPath = null;
-        var handler = new GameDevelopmentReloadHandler(signal, Path.Combine(_root, "legacy.dll"), _root, receipt,
+        var handler = new GameDevelopmentReloadHandler(signal, Path.Combine(_root, "legacy.dll"), GameAssembly, _root, receipt,
             (path, token) => { observedPath = path; return Task.FromResult(Report(outcome)); }, (kind, detail) => { });
 
         await handler.HandleAsync(CancellationToken.None);
 
-        Assert.AreEqual(Path.Combine(_root, request.GetAssemblyRelativePath()), observedPath);
+        Assert.AreEqual(Path.Combine(_root, "generations", id.ToString("N"), GameAssembly), observedPath);
         var result = await DevelopmentReloadFiles.ReadResultAsync(receipt, CancellationToken.None);
         Assert.AreEqual(id, result.GenerationId);
         Assert.AreEqual(status, result.Status);
@@ -53,7 +55,7 @@ public sealed class GameDevelopmentReloadHandlerTests
         var id = Guid.NewGuid();
         await DevelopmentReloadFiles.WriteRequestAsync(signal, new(1, id), CancellationToken.None);
         var reloads = 0;
-        var handler = new GameDevelopmentReloadHandler(signal, "legacy.dll", _root, receipt,
+        var handler = new GameDevelopmentReloadHandler(signal, "legacy.dll", GameAssembly, _root, receipt,
             (path, token) => { reloads++; return Task.FromResult(Report(ReloadOutcome.Applied)); }, (kind, detail) => { });
 
         await Assert.ThrowsAsync<DirectoryNotFoundException>(() => handler.HandleAsync(CancellationToken.None));
@@ -70,7 +72,7 @@ public sealed class GameDevelopmentReloadHandlerTests
         var signal = Path.Combine(_root, "reload.signal");
         var receipt = Path.Combine(_root, "reload.result");
         await DevelopmentReloadFiles.WriteRequestAsync(signal, new(1, Guid.NewGuid()), CancellationToken.None);
-        var handler = new GameDevelopmentReloadHandler(signal, "legacy.dll", _root, receipt,
+        var handler = new GameDevelopmentReloadHandler(signal, "legacy.dll", GameAssembly, _root, receipt,
             (path, token) => throw new InvalidOperationException("lease invalid"), (kind, detail) => { });
 
         await handler.HandleAsync(CancellationToken.None);
@@ -93,7 +95,7 @@ public sealed class GameDevelopmentReloadHandlerTests
         var receipt = Path.Combine(_root, "reload.result");
         await File.WriteAllTextAsync(signal, payload);
         var reloads = 0;
-        var handler = new GameDevelopmentReloadHandler(signal, "legacy.dll", _root, receipt,
+        var handler = new GameDevelopmentReloadHandler(signal, "legacy.dll", GameAssembly, _root, receipt,
             (path, token) => { reloads++; return Task.FromResult(Report(ReloadOutcome.Applied)); }, (kind, detail) => { });
 
         Exception? failure = null;
@@ -110,7 +112,7 @@ public sealed class GameDevelopmentReloadHandlerTests
     {
         var signal = Path.Combine(_root, "reload.signal");
         await File.WriteAllTextAsync(signal, new string(' ', 8193));
-        var handler = new GameDevelopmentReloadHandler(signal, "legacy.dll", _root, Path.Combine(_root, "reload.result"),
+        var handler = new GameDevelopmentReloadHandler(signal, "legacy.dll", GameAssembly, _root, Path.Combine(_root, "reload.result"),
             (path, token) => throw new AssertFailedException("An oversized request cannot reach activation."), (kind, detail) => { });
         await Assert.ThrowsAsync<InvalidDataException>(() => handler.HandleAsync(CancellationToken.None));
     }
@@ -122,11 +124,17 @@ public sealed class GameDevelopmentReloadHandlerTests
         await File.WriteAllTextAsync(signal, DateTimeOffset.UtcNow.ToString("O"));
         var legacy = Path.Combine(_root, "legacy.dll");
         string? observed = null;
-        var handler = new GameDevelopmentReloadHandler(signal, legacy, null, null,
+        var handler = new GameDevelopmentReloadHandler(signal, legacy, GameAssembly, null, null,
             (path, token) => { observed = path; return Task.FromResult(Report(ReloadOutcome.Applied)); }, (kind, detail) => { });
         await handler.HandleAsync(CancellationToken.None);
         Assert.AreEqual(legacy, observed);
     }
+
+    [TestMethod]
+    [DataRow("")]
+    [DataRow(" ")]
+    public void ABlankGameAssemblyFileNameIsRefused(string fileName) =>
+        Assert.Throws<ArgumentException>(() => new DevelopmentReloadRequest(1, Guid.NewGuid()).GetAssemblyRelativePath(fileName));
 
     private static ReloadReport Report(ReloadOutcome outcome) =>
         new(outcome, 1, outcome == ReloadOutcome.Applied ? 2 : 1, TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero, true, "actual outcome");

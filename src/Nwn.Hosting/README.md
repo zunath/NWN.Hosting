@@ -25,7 +25,7 @@ public static class Entry
 }
 ```
 
-A process that hosts `ReloadHost` must keep every thread-pool worker alive: set `System.Threading.ThreadPool.ThreadsToKeepAlive` to `-1` in the host project (`<RuntimeHostConfigurationOption Include="System.Threading.ThreadPool.ThreadsToKeepAlive" Value="-1" />`). `ReloadHost` refuses to start otherwise. The reasons, and the rules for gameplay code that must stay unloadable, are in the `docs` folder of the repository: `threads-outlive-generations.md`, `generic-virtual-dispatch.md` and `generation-leaks.md`.
+A process that hosts `ReloadHost` must keep every thread-pool worker alive: set `System.Threading.ThreadPool.ThreadsToKeepAlive` to `-1` in the host project (`<RuntimeHostConfigurationOption Include="System.Threading.ThreadPool.ThreadsToKeepAlive" Value="-1" />`). `ReloadHost` refuses to start otherwise. The reasons, and the rules for gameplay code that must stay unloadable, are in the `docs` folder of the repository: `threads-outlive-generations.md`, `generic-virtual-dispatch.md` and `generation-leaks.md`. `adopting.md` describes moving an existing server onto the packages.
 
 Part of the Nwn.Hosting packages (Nwn.Hosting.Contracts, Nwn.Hosting, Nwn.Hosting.Testing). Released as previews; APIs may change before 1.0.
 

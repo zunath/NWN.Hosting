@@ -81,8 +81,8 @@ public sealed class ReloadHost : IGenerationLiveness, IAsyncDisposable
         }
         catch (Exception exception)
         {
-            // Full ToString() (with stack trace), not just type+message -- see the doc comment on
-            // TryDispatchScript's identical change.
+            // Full ToString() (with stack trace), not just type+message, for the same reason as in
+            // TryDispatchScript.
             _native.Report("main-loop-dispatch-failure", exception.ToString());
         }
     }

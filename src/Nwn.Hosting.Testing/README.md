@@ -11,7 +11,7 @@ Test doubles and retired-generation assertions for code built on `Nwn.Hosting`. 
 | `VirtualDispatchCacheInspector` | Reads the runtime's generic-virtual-dispatch cache so a test can see whether its flush sentinel holds an entry. |
 | `TestAssertions` | `Require`, `RequireThrows`, `RequireThrowsAsync` and `RequireNoRetainedContexts`, throwing `HostingAssertionException`. |
 
-A fixture generation that implements `IFixtureCallbackBindings`-aware code must see the same type as the test, so the test host lists this assembly as shared when it creates the `ReloadHost`:
+A fixture generation that registers callbacks through `IFixtureCallbackBindings` must see the same type as the test that implements it, so the test lists this assembly as shared when it creates the `ReloadHost`:
 
 ```csharp
 var options = new GenerationLoadOptions(["Nwn.Hosting.Testing"]);

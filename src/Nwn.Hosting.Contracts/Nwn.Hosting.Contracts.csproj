@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Nwn.Hosting.Contracts</RootNamespace>
+    <Description>The boundary types between a permanent NWNX DotNET host and the hot-reloadable gameplay generations it loads: generation lifecycle, engine-thread seam, script and main-loop sinks, and the development reload file protocol. No package dependencies.</Description>
+    <IsPackable>true</IsPackable>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="/" />
+    <None Include="../../licenses/NWN-Hosting-MIT.txt" Pack="true" PackagePath="licenses/" />
+  </ItemGroup>
+</Project>

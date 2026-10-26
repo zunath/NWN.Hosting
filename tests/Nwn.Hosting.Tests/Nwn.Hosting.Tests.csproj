@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Nwn.Hosting.Tests</RootNamespace>
+    <IsTestProject>true</IsTestProject>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.10.1" />
+    <PackageReference Include="MSTest.TestAdapter" Version="4.4.1" />
+    <PackageReference Include="MSTest.TestFramework" Version="4.4.1" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/Nwn.Hosting.Contracts/Nwn.Hosting.Contracts.csproj" />
+    <ProjectReference Include="../../src/Nwn.Hosting/Nwn.Hosting.csproj" />
+    <ProjectReference Include="../../src/Nwn.Hosting.Testing/Nwn.Hosting.Testing.csproj" />
+    <!-- A minimal IScriptDispatcher/IMainLoopSink-exposing fixture for the RunScript/main-loop
+         forwarding tests. A real reference: its build output lands in this project's own output
+         directory, where the tests load it by file path, mirroring production reload. -->
+    <ProjectReference Include="../assets/Nwn.Hosting.TestScriptGameplay/Nwn.Hosting.TestScriptGameplay.csproj" />
+    <!-- Not referenced for compilation: V1 and V2 define the identical type
+         Nwn.Hosting.Reload.Gameplay.ReloadFixture, and all three payloads below are always loaded from
+         disk by path into their own collectible load context, exactly like production reload.
+         ReferenceOutputAssembly=false keeps them out of the default load context; the target below places
+         their build output at the "games/v1", "games/v2" and "games/dispatch" paths the tests expect. -->
+    <ProjectReference Include="../assets/Nwn.Hosting.TestGameplay.V1/Nwn.Hosting.TestGameplay.V1.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="../assets/Nwn.Hosting.TestGameplay.V2/Nwn.Hosting.TestGameplay.V2.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="../assets/Nwn.Hosting.TestDispatchGameplay/Nwn.Hosting.TestDispatchGameplay.csproj" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- The test host reloads generations exactly like a server, so it keeps thread-pool workers alive
+         for the same reason (src/Nwn.Hosting/Reload/ThreadPoolKeepAlive.cs); ReloadHost refuses to
+         start without it. -->
+    <RuntimeHostConfigurationOption Include="System.Threading.ThreadPool.ThreadsToKeepAlive" Value="-1" />
+  </ItemGroup>
+  <Target Name="CopyFixtureAssemblies" AfterTargets="Build">
+    <MakeDir Directories="$(OutDir)games\v1;$(OutDir)games\v2;$(OutDir)games\dispatch" />
+    <Copy SourceFiles="../assets/Nwn.Hosting.TestGameplay.V1/bin/$(Configuration)/$(TargetFramework)/Nwn.Hosting.Reload.Gameplay.V1.dll;../assets/Nwn.Hosting.TestGameplay.V1/bin/$(Configuration)/$(TargetFramework)/Nwn.Hosting.Contracts.dll" DestinationFolder="$(OutDir)games\v1" />
+    <Copy SourceFiles="../assets/Nwn.Hosting.TestGameplay.V2/bin/$(Configuration)/$(TargetFramework)/Nwn.Hosting.Reload.Gameplay.V2.dll;../assets/Nwn.Hosting.TestGameplay.V2/bin/$(Configuration)/$(TargetFramework)/Nwn.Hosting.Contracts.dll" DestinationFolder="$(OutDir)games\v2" />
+    <Copy SourceFiles="../assets/Nwn.Hosting.TestDispatchGameplay/bin/$(Configuration)/$(TargetFramework)/Nwn.Hosting.Reload.DispatchGameplay.dll;../assets/Nwn.Hosting.TestDispatchGameplay/bin/$(Configuration)/$(TargetFramework)/Nwn.Hosting.Contracts.dll" DestinationFolder="$(OutDir)games\dispatch" />
+  </Target>
+</Project>

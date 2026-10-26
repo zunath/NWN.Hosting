@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Test-only fixture payload: a minimal IGameplayGeneration that exposes
+       IScriptDispatcher/IMainLoopSink so Nwn.Hosting.Tests can prove RunScript/main-loop
+       forwarding reaches only the active generation across a reload swap, without a full gameplay
+       assembly. A real ProjectReference (default ReferenceOutputAssembly), so its DLL lands directly
+       in Nwn.Hosting.Tests's own output directory. -->
+  <PropertyGroup>
+    <AssemblyName>Nwn.Hosting.Reload.ScriptGameplay</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../../src/Nwn.Hosting.Contracts/Nwn.Hosting.Contracts.csproj" />
+  </ItemGroup>
+</Project>

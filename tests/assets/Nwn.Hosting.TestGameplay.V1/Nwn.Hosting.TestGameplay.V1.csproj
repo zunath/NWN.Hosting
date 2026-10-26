@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Test-only reload fixture payload for Nwn.Hosting.Tests. Nwn.Hosting.Tests copies the built
+       "Nwn.Hosting.Reload.Gameplay.V1" assembly to games/v1 and loads it by path; V2 defines the same
+       entry type so the two can replace each other. The fixture registers its callbacks through
+       IFixtureCallbackBindings, which the test host shares into the generation by name. -->
+  <PropertyGroup>
+    <AssemblyName>Nwn.Hosting.Reload.Gameplay.V1</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../../src/Nwn.Hosting.Contracts/Nwn.Hosting.Contracts.csproj" />
+    <ProjectReference Include="../../../src/Nwn.Hosting.Testing/Nwn.Hosting.Testing.csproj" />
+  </ItemGroup>
+</Project>

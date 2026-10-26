@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Test-only fixture payload for VirtualDispatchCacheSentinelTests: a generation whose activation makes
+       generic virtual calls on types it defines, the calls that populate the runtime's dispatch cache.
+       Nwn.Hosting.Tests copies the built assembly to games/dispatch and loads it by path into a new
+       collectible context per cycle. -->
+  <PropertyGroup>
+    <AssemblyName>Nwn.Hosting.Reload.DispatchGameplay</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../../src/Nwn.Hosting.Contracts/Nwn.Hosting.Contracts.csproj" />
+  </ItemGroup>
+</Project>

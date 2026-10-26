@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The replacement for Nwn.Hosting.TestGameplay.V1; see that project. -->
+  <PropertyGroup>
+    <AssemblyName>Nwn.Hosting.Reload.Gameplay.V2</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../../src/Nwn.Hosting.Contracts/Nwn.Hosting.Contracts.csproj" />
+    <ProjectReference Include="../../../src/Nwn.Hosting.Testing/Nwn.Hosting.Testing.csproj" />
+  </ItemGroup>
+</Project>

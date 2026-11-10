@@ -1,10 +1,14 @@
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using Nwn.Hosting.Bootstrap;
 using Nwn.Hosting.Contracts.Generations;
 
 namespace Nwn.Hosting.Reload;
 
-/// <summary>One gameplay assembly loaded into its own collectible context, with the tracking a reload needs to retire it.</summary>
+/// <summary>
+/// One gameplay assembly loaded into its own load context, with the tracking a reload needs to retire it. The context
+/// is collectible unless <see cref="GenerationLoadOptions.Collectible"/> is false.
+/// </summary>
 public sealed class LoadedGeneration
 {
     private CollectibleGameplayLoadContext? _context;
@@ -15,10 +19,14 @@ public sealed class LoadedGeneration
         _context = context;
         _gameplay = gameplay;
         Generation = generation;
+        IsCollectible = context.IsCollectible;
         Execution = new GenerationExecution();
     }
 
     public long Generation { get; }
+
+    /// <summary>Whether the generation's context can be unloaded; false when it was loaded with <see cref="GenerationLoadOptions.Collectible"/> false.</summary>
+    public bool IsCollectible { get; }
     public IGenerationExecution Execution { get; }
     public IGameplayGeneration Gameplay => _gameplay ?? throw new ObjectDisposedException(nameof(LoadedGeneration));
 
@@ -62,7 +70,10 @@ public sealed class LoadedGeneration
         }
         catch
         {
-            context.Unload();
+            if (context.IsCollectible)
+            {
+                context.Unload();
+            }
             throw;
         }
     }
@@ -99,20 +110,56 @@ public sealed class LoadedGeneration
         };
     }
 
-    public async ValueTask<WeakReference> DisposeAndUnloadAsync(IPermanentNativeBindings native)
+    /// <summary>
+    /// Disposes the generation on the engine thread and unloads its context; returns a weak reference that dies once
+    /// the context is collected. A non-collectible context is never unloaded, so its reference stays alive.
+    /// </summary>
+    public ValueTask<WeakReference> DisposeAndUnloadAsync(IPermanentNativeBindings native) => DisposeAndUnloadAsync(native, closures: null);
+
+    /// <summary>
+    /// <see cref="DisposeAndUnloadAsync(IPermanentNativeBindings)"/> that also retires the generation's closures in
+    /// <paramref name="closures"/> on the engine thread, in the same engine-thread call as the dispose, so none of its
+    /// pending closures can run between the dispose and the drop.
+    /// </summary>
+    internal async ValueTask<WeakReference> DisposeAndUnloadAsync(IPermanentNativeBindings native, CoreFunctionHandler? closures)
     {
-        if (_gameplay is not null)
+        if (_gameplay is { } gameplay)
         {
-            await native.InvokeOnEngineThreadAsync(
-                () => _gameplay.DisposeAsync(), CancellationToken.None).ConfigureAwait(false);
+            await native.InvokeOnEngineThreadAsync(() =>
+            {
+                try
+                {
+                    return gameplay.DisposeAsync();
+                }
+                finally
+                {
+                    RetireClosures(native, closures);
+                }
+            }, CancellationToken.None).ConfigureAwait(false);
         }
 
         _gameplay = null;
         var context = _context ?? throw new ObjectDisposedException(nameof(LoadedGeneration));
         _context = null;
         var weak = new WeakReference(context, trackResurrection: false);
-        context.Unload();
+        if (context.IsCollectible)
+        {
+            context.Unload();
+        }
         return weak;
+    }
+
+    private void RetireClosures(IPermanentNativeBindings native, CoreFunctionHandler? closures)
+    {
+        if (closures is null)
+        {
+            return;
+        }
+        var dropped = closures.RetireGeneration(Generation);
+        if (dropped > 0)
+        {
+            native.Report("closures-dropped", $"generation={Generation} dropped={dropped}");
+        }
     }
 
     public static async ValueTask<bool> ProbeCollectedAsync(WeakReference context, Action<string>? diagnostic = null)

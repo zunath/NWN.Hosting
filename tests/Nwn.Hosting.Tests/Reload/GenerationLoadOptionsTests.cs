@@ -38,4 +38,12 @@ public sealed class GenerationLoadOptionsTests
     {
         Assert.Throws<ArgumentException>(() => new GenerationLoadOptions([], prefix));
     }
+
+    [TestMethod]
+    public void Generations_AreCollectibleUnlessTheOptionsSayOtherwise()
+    {
+        Assert.IsTrue(GenerationLoadOptions.Default.Collectible);
+        Assert.IsTrue(new GenerationLoadOptions(["Serilog"], "game").Collectible);
+        Assert.IsFalse((GenerationLoadOptions.Default with { Collectible = false }).Collectible);
+    }
 }

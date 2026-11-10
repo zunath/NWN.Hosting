@@ -140,5 +140,16 @@ public sealed class CollectibleGameplayLoadContextTests
         Assert.Throws<ArgumentNullException>(() => new CollectibleGameplayLoadContext(GameplayAssemblyPath, null!));
     }
 
+    [TestMethod]
+    public void NonCollectibleOptions_CreateANonCollectibleContextThatStillSharesTheHostsAssemblies()
+    {
+        // Never unloaded: it loads nothing of its own here, so it stays an empty context for the rest of the run.
+        var context = Create(GenerationLoadOptions.Default with { Collectible = false });
+
+        Assert.IsFalse(context.IsCollectible);
+        Assert.AreSame(typeof(IGameplayGeneration).Assembly, context.ResolveForTest(typeof(IGameplayGeneration).Assembly.GetName()));
+        StringAssert.StartsWith(context.Name, "nwn-hosting-gameplay-");
+    }
+
     private static CollectibleGameplayLoadContext Create(GenerationLoadOptions options) => new(GameplayAssemblyPath, options);
 }

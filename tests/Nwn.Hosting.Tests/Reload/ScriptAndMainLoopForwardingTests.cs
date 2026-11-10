@@ -1,3 +1,4 @@
+using Nwn.Hosting.Bootstrap;
 using Nwn.Hosting.Reload;
 using Nwn.Hosting.Reload.ScriptGameplay;
 using Nwn.Hosting.Testing.Fixtures;
@@ -84,6 +85,32 @@ public sealed class ScriptAndMainLoopForwardingTests
         Assert.IsFalse(host.TryDispatchScript(firstScript, ObjectSelf), "The retired generation's own script must no longer be handled.");
         Assert.IsTrue(host.TryDispatchScript(secondScript, ObjectSelf), "The newly active generation's script must be handled.");
         Assert.AreEqual(1, native.Count("script-handled"), "Only the live generation's handler may have run.");
+    }
+
+    [TestMethod]
+    public async Task DispatchScriptResult_IsNotHandled_WhenNoGenerationIsActive()
+    {
+        var native = new RecordingNativeBindings();
+        await using var host = new ReloadHost(native);
+
+        Assert.AreEqual(NativeHost.ScriptNotHandled, host.DispatchScriptResult(ScriptGameplayGeneration.ConditionalTrueScriptName, ObjectSelf));
+    }
+
+    [TestMethod]
+    public async Task DispatchScriptResult_GivesTheEngineTheActiveGenerationsResult()
+    {
+        var native = new RecordingNativeBindings();
+        await using var host = new ReloadHost(native);
+        var report = await host.ReloadAsync(ScriptGameplayAssemblyPath(), DrainTimeout);
+        Require(report.Outcome == ReloadOutcome.Applied, report.Detail);
+
+        Assert.AreEqual(1, host.DispatchScriptResult(ScriptGameplayGeneration.ConditionalTrueScriptName, ObjectSelf), "A true conditional script is 1.");
+        Assert.AreEqual(0, host.DispatchScriptResult(ScriptGameplayGeneration.ConditionalFalseScriptName, ObjectSelf), "A false conditional script is 0.");
+        Assert.AreEqual(0, host.DispatchScriptResult(ScriptGameplayGeneration.ScriptNameFor(report.ActiveGeneration!.Value), ObjectSelf),
+            "A handled action script is 0.");
+        Assert.AreEqual(-1, host.DispatchScriptResult("nh_totally_unknown", ObjectSelf), "An unknown script is not handled.");
+        Assert.AreEqual(-1, host.DispatchScriptResult(ScriptGameplayGeneration.ThrowingScriptName, ObjectSelf), "A failed dispatch is not handled.");
+        Assert.AreEqual(1, native.Count("script-dispatch-failure"));
     }
 
     [TestMethod]

@@ -28,8 +28,10 @@ internal sealed class CollectibleGameplayLoadContext : AssemblyLoadContext
     private readonly AssemblyDependencyResolver _resolver;
     private readonly HashSet<string> _sharedAssemblyNames;
 
+    // Collectible unless the options ask for a single build that is never unloaded (GenerationLoadOptions.Collectible);
+    // the name and resolution rules are the same either way.
     public CollectibleGameplayLoadContext(string gameplayAssemblyPath, GenerationLoadOptions options)
-        : base(ContextName(options), isCollectible: true)
+        : base(ContextName(options), isCollectible: options.Collectible)
     {
         _resolver = new AssemblyDependencyResolver(gameplayAssemblyPath);
         _sharedAssemblyNames = new HashSet<string>(AlwaysSharedAssemblyNames.Concat(options.SharedAssemblyNames), StringComparer.Ordinal);

@@ -23,6 +23,9 @@ public sealed class FixtureNativeBindings : IPermanentNativeBindings, IFixtureCa
     public ValueTask InvokeOnEngineThreadAsync(Func<ValueTask> action, CancellationToken cancellationToken) =>
         _engine.InvokeAsync(action, cancellationToken);
 
+    /// <summary>The managed id of the stand-in engine thread, for a <c>CoreFunctionHandler</c> the test drives on it.</summary>
+    public int EngineThreadId => _engine.ThreadId;
+
     public int CallbackCount => Volatile.Read(ref _executing) + PendingCount;
     private int PendingCount { get { lock (_gate) return _pending.Count; } }
     public int ActiveRegistrationCount { get { lock (_gate) return _registrations.Count(item => item.Active); } }

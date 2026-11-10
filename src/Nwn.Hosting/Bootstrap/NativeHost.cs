@@ -19,6 +19,18 @@ public static class NativeHost
     /// </summary>
     public const uint ModuleObject = 0x00000000;
 
+    /// <summary>
+    /// The run-script result that tells NWNX DotNET the script was not handled, so the engine runs the module's
+    /// compiled script (NWNX's <c>~0</c>).
+    /// </summary>
+    public const int ScriptNotHandled = -1;
+
+    /// <summary>The run-script result of a handled script that is not conditional, or of a conditional one that is false.</summary>
+    public const int ScriptHandled = 0;
+
+    /// <summary>The run-script result of a conditional script that is true.</summary>
+    public const int ScriptConditionTrue = 1;
+
     private const string DefaultLogPrefix = "NWN_HOSTING_NATIVE";
     private const string ModuleLoadFinishSignal = "ON_MODULE_LOAD_FINISH";
     private const string DestroyServerSignal = "ON_DESTROY_SERVER";
@@ -40,10 +52,11 @@ public static class NativeHost
     public static void Initialize(NativeHostOptions options) => Initialize(options, RegisterNativeCallbacks);
 
     /// <summary>
-    /// The initialization sequence with the native registration injected, so the order of the steps around it
-    /// can be exercised without a running server.
+    /// The initialization sequence with the native registration (and, optionally, the closure scheduler) injected, so
+    /// the order of the steps around it and the closures it schedules can be exercised without a running server.
     /// </summary>
-    internal static void Initialize(NativeHostOptions options, Action<CoreFunctionHandler> registerNative)
+    internal static void Initialize(
+        NativeHostOptions options, Action<CoreFunctionHandler> registerNative, INativeClosureScheduler? closureScheduler = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         if (Interlocked.Exchange(ref _bootstrapped, 1) != 0)
@@ -55,7 +68,8 @@ public static class NativeHost
         _extensions = [.. options.Extensions];
         try
         {
-            var coreFunctions = new CoreFunctionHandler(Environment.CurrentManagedThreadId);
+            var coreFunctions = new CoreFunctionHandler(
+                Environment.CurrentManagedThreadId, options.MaximumPendingClosures, closureScheduler ?? NwnxClosureScheduler.Instance);
             _coreFunctions = coreFunctions;
             _mode = options.CreateMode(coreFunctions);
             registerNative(coreFunctions);
@@ -89,18 +103,24 @@ public static class NativeHost
     }
 
     [UnmanagedCallersOnly]
-    private static int OnRunScript(IntPtr scriptPointer, uint objectSelf)
+    private static int OnRunScript(IntPtr scriptPointer, uint objectSelf) => HandleRunScript(scriptPointer, objectSelf);
+
+    /// <summary>
+    /// The run-script callback: the mode's <see cref="IHostMode.OnRunScriptResult"/> for the script, or
+    /// <see cref="ScriptNotHandled"/> when there is no script name, no mode, or the mode threw.
+    /// </summary>
+    internal static int HandleRunScript(IntPtr scriptPointer, uint objectSelf)
     {
         try
         {
             using var scope = _coreFunctions?.EnterObjectSelf(objectSelf);
             var script = Marshal.PtrToStringUTF8(scriptPointer);
-            return script is not null && _mode?.OnRunScript(script, objectSelf) == true ? 0 : -1;
+            return script is not null && _mode is { } mode ? mode.OnRunScriptResult(script, objectSelf) : ScriptNotHandled;
         }
         catch (Exception exception)
         {
             ReportCallbackFailure("run-script", exception);
-            return -1;
+            return ScriptNotHandled;
         }
     }
 
@@ -177,7 +197,8 @@ public static class NativeHost
             }
             try
             {
-                coreFunctions.ClosureAssignCommand(ModuleObject, () =>
+                // The host owns the frame closure: dropping it with a retired generation would stop every later frame.
+                coreFunctions.HostAssignCommand(ModuleObject, () =>
                 {
                     try
                     {

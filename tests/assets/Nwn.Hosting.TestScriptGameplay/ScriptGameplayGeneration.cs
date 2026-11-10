@@ -1,19 +1,28 @@
+using NWN.Core;
 using Nwn.Hosting.Contracts.Generations;
 
 namespace Nwn.Hosting.Reload.ScriptGameplay;
 
 /// <summary>
-/// Recognizes exactly one script name, <c>"nh_gen_&lt;generation&gt;"</c>, tying it to whichever
+/// Recognizes exactly one action script name, <c>"nh_gen_&lt;generation&gt;"</c>, tying it to whichever
 /// generation number this activation actually received - so two activations of this SAME fixture
 /// (an ordinary reload cycle, exactly like a many-generation proof of real gameplay) give the
 /// test two distinct, unambiguous script names to assert against without needing two separate
 /// fixture assemblies. <c>"nh_throws"</c> and the main-loop tick each have their own injectable
 /// failure, so a test can prove the host survives a broken generation without crashing everyone else.
+/// <c>"nh_cond_true"</c> and <c>"nh_cond_false"</c> are conditional scripts with a fixed result, and
+/// <c>"nh_schedule_closure"</c> schedules a <c>DelayCommand</c> closure through the host's
+/// <see cref="ICoreFunctionHandler"/> (resolved from the host services) that reports
+/// <c>"&lt;generation&gt;:&lt;sequence&gt;"</c> under <c>"closure-ran"</c> when it runs.
 /// </summary>
 public sealed class ScriptGameplayGeneration : IGameplayGeneration
 {
     public const string ThrowingScriptName = "nh_throws";
     public const string TickFailureVariable = "NWN_HOSTING_SCRIPT_FIXTURE_TICK_FAIL";
+    public const string ConditionalTrueScriptName = "nh_cond_true";
+    public const string ConditionalFalseScriptName = "nh_cond_false";
+    public const string ScheduleClosureScriptName = "nh_schedule_closure";
+    public const string ClosureRanCategory = "closure-ran";
 
     private GenerationActivation? _activation;
 
@@ -49,18 +58,38 @@ public sealed class ScriptGameplayGeneration : IGameplayGeneration
 
     private sealed class Dispatcher(GenerationActivation activation) : IScriptDispatcher
     {
+        private int _scheduled;
+
         public bool TryHandle(string scriptName, uint objectSelf, out bool conditionalResult)
         {
             conditionalResult = false;
-            if (scriptName == ThrowingScriptName)
+            switch (scriptName)
             {
-                throw new InvalidOperationException("Injected script dispatch failure.");
+                case ThrowingScriptName:
+                    throw new InvalidOperationException("Injected script dispatch failure.");
+                case ConditionalTrueScriptName:
+                    conditionalResult = true;
+                    return true;
+                case ConditionalFalseScriptName:
+                    return true;
+                case ScheduleClosureScriptName:
+                    ScheduleClosure(objectSelf);
+                    return true;
             }
 
             if (scriptName != ScriptNameFor(activation.Generation)) return false;
 
             activation.Native.Report("script-handled", $"{scriptName}:{objectSelf}");
             return true;
+        }
+
+        private void ScheduleClosure(uint objectSelf)
+        {
+            var closures = (ICoreFunctionHandler?)activation.HostServices?.Resolve(typeof(ICoreFunctionHandler))
+                ?? throw new InvalidOperationException("The host shares no ICoreFunctionHandler.");
+            var sequence = ++_scheduled;
+            closures.ClosureDelayCommand(objectSelf, 1.0f,
+                () => activation.Native.Report(ClosureRanCategory, $"{activation.Generation}:{sequence}"));
         }
     }
 

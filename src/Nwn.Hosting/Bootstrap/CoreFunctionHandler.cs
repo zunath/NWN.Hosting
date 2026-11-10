@@ -1,5 +1,4 @@
 using NWN.Core;
-using NWNX.NET;
 
 namespace Nwn.Hosting.Bootstrap;
 
@@ -8,27 +7,93 @@ namespace Nwn.Hosting.Bootstrap;
 /// and <c>ActionDoCommand</c> closure is kept here under an event id until NWNX calls it back on the
 /// engine thread (<see cref="Dispatch"/>), and <c>OBJECT_SELF</c> follows the callback's object.
 /// </summary>
+/// <remarks>
+/// <para>
+/// A pending closure holds a delegate of the code that scheduled it, so each closure belongs to a generation: the
+/// one <see cref="BeginGeneration"/> named when it was scheduled, or the host (<see cref="HostGeneration"/>) before
+/// any generation began. <see cref="RetireGeneration"/> drops every pending closure of a retired generation without
+/// running it, so retired code neither runs after its generation was disposed nor keeps its load context alive; the
+/// engine's later callback for a dropped closure is ignored. The host's own frame closure always belongs to the
+/// host. A consumer that never calls <see cref="BeginGeneration"/> keeps every closure as the host's, as earlier
+/// versions did.
+/// </para>
+/// <para>
+/// At most <see cref="MaximumPendingClosures"/> closures may wait for their callback at once
+/// (<see cref="DefaultMaximumPendingClosures"/> unless the consumer chose another limit or none).
+/// </para>
+/// </remarks>
 public sealed class CoreFunctionHandler : ICoreFunctionHandler, IDisposable
 {
-    private const int MaximumPendingClosures = 64;
+    /// <summary>The pending-closure limit of a handler created without one.</summary>
+    public const int DefaultMaximumPendingClosures = 64;
+
+    /// <summary>The owner of closures scheduled while no generation has begun, and of the host's own frame closure.</summary>
+    public const long HostGeneration = 0;
+
     private readonly object _gate = new();
     private readonly int _engineThreadId;
-    private readonly Dictionary<ulong, Action> _closures = [];
+    private readonly int? _maximumPendingClosures;
+    private readonly INativeClosureScheduler _scheduler;
+    private readonly Dictionary<ulong, PendingClosure> _closures = [];
+    // The event ids of dropped closures whose callback has not arrived yet, so it is ignored quietly. An action the
+    // engine discards never calls back and keeps its id here: eight bytes, and only on a host that retires generations.
+    private readonly HashSet<ulong> _dropped = [];
     private ulong _nextEventId = 1;
     private uint _objectSelf = NWScript.OBJECT_INVALID;
+    private long _schedulingGeneration = HostGeneration;
+    private bool _schedulingGenerationRetired;
+    private long _droppedClosures;
     private bool _disposed;
 
-    public CoreFunctionHandler(int engineThreadId) => _engineThreadId = engineThreadId;
+    /// <summary>Creates a handler that allows <see cref="DefaultMaximumPendingClosures"/> pending closures.</summary>
+    public CoreFunctionHandler(int engineThreadId)
+        : this(engineThreadId, DefaultMaximumPendingClosures)
+    {
+    }
+
+    /// <param name="engineThreadId">The managed id of the NWN engine thread; scheduling, dispatch and the generation calls must run on it.</param>
+    /// <param name="maximumPendingClosures">How many closures may wait for their callback at once; null for no limit.</param>
+    public CoreFunctionHandler(int engineThreadId, int? maximumPendingClosures)
+        : this(engineThreadId, maximumPendingClosures, NwnxClosureScheduler.Instance)
+    {
+    }
+
+    /// <param name="engineThreadId">The managed id of the NWN engine thread; scheduling, dispatch and the generation calls must run on it.</param>
+    /// <param name="maximumPendingClosures">How many closures may wait for their callback at once; null for no limit.</param>
+    /// <param name="scheduler">Hands each closure's event id to the engine; the other constructors use NWNX DotNET.</param>
+    public CoreFunctionHandler(int engineThreadId, int? maximumPendingClosures, INativeClosureScheduler scheduler)
+    {
+        if (maximumPendingClosures is <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumPendingClosures), maximumPendingClosures, "The limit must be positive, or null for no limit.");
+        }
+        ArgumentNullException.ThrowIfNull(scheduler);
+        _engineThreadId = engineThreadId;
+        _maximumPendingClosures = maximumPendingClosures;
+        _scheduler = scheduler;
+    }
 
     public uint ObjectSelf => _objectSelf;
 
     public int PendingCount { get { lock (_gate) return _closures.Count; } }
 
+    /// <summary>How many closures may wait for their callback at once; null when there is no limit.</summary>
+    public int? MaximumPendingClosures => _maximumPendingClosures;
+
+    /// <summary>The generation that owns closures scheduled now; <see cref="HostGeneration"/> before any generation began.</summary>
+    public long SchedulingGeneration { get { lock (_gate) return _schedulingGeneration; } }
+
+    /// <summary>
+    /// How many closures were dropped without running since the handler was created: those pending when their
+    /// generation retired, and those a retired generation scheduled afterwards.
+    /// </summary>
+    public long DroppedClosures { get { lock (_gate) return _droppedClosures; } }
+
     public void ClosureActionDoCommand(uint obj, Action action) =>
-        Schedule(obj, action, eventId => NWNXAPI.ClosureActionDoCommand(obj, eventId), "ActionDoCommand");
+        Schedule(obj, action, ClosureKind.ActionDoCommand, 0, hostOwned: false);
 
     public void ClosureAssignCommand(uint obj, Action action) =>
-        Schedule(obj, action, eventId => NWNXAPI.ClosureAssignCommand(obj, eventId), "AssignCommand");
+        Schedule(obj, action, ClosureKind.AssignCommand, 0, hostOwned: false);
 
     public void ClosureDelayCommand(uint obj, float duration, Action action)
     {
@@ -36,7 +101,7 @@ public sealed class CoreFunctionHandler : ICoreFunctionHandler, IDisposable
         {
             throw new ArgumentOutOfRangeException(nameof(duration));
         }
-        Schedule(obj, action, eventId => NWNXAPI.ClosureDelayCommand(obj, duration, eventId), "DelayCommand");
+        Schedule(obj, action, ClosureKind.DelayCommand, duration, hostOwned: false);
     }
 
     public IDisposable EnterObjectSelf(uint objectSelf)
@@ -50,17 +115,78 @@ public sealed class CoreFunctionHandler : ICoreFunctionHandler, IDisposable
     public void Dispatch(ulong eventId, uint objectSelf)
     {
         AssertEngineThread();
-        Action? action;
+        Action action;
         lock (_gate)
         {
-            if (_disposed || !_closures.Remove(eventId, out action))
+            if (_disposed || !_closures.Remove(eventId, out var pending))
             {
+                // The callback of a closure dropped with its retired generation is expected; it was counted when dropped.
+                if (!_disposed && _dropped.Remove(eventId))
+                {
+                    return;
+                }
                 NativeHost.Log("closure", $"ignored stale event={eventId} object=0x{objectSelf:X8}");
                 return;
             }
+            action = pending.Action;
         }
         using var scope = EnterObjectSelf(objectSelf);
         action();
+    }
+
+    /// <summary>
+    /// Makes <paramref name="generation"/> the owner of every closure scheduled from now on, until another generation
+    /// begins. <see cref="Reload.ReloadHost"/> calls it on the engine thread right before it activates a generation.
+    /// </summary>
+    public void BeginGeneration(long generation)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(generation);
+        AssertEngineThread();
+        lock (_gate)
+        {
+            _schedulingGeneration = generation;
+            _schedulingGenerationRetired = false;
+        }
+    }
+
+    /// <summary>
+    /// Drops every pending closure of <paramref name="generation"/> without running it and returns how many were
+    /// dropped; the engine's later callback for each is ignored. Closures of other generations and of the host stay
+    /// pending. When <paramref name="generation"/> is the <see cref="SchedulingGeneration"/>, closures scheduled after
+    /// this call are dropped too, until <see cref="BeginGeneration"/> names the next generation: only the retired
+    /// generation's leftover code schedules them. <see cref="Reload.ReloadHost"/> calls it on the engine thread when it
+    /// disposes a generation.
+    /// </summary>
+    public int RetireGeneration(long generation)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(generation);
+        AssertEngineThread();
+        lock (_gate)
+        {
+            if (_schedulingGeneration == generation)
+            {
+                _schedulingGenerationRetired = true;
+            }
+            if (_disposed)
+            {
+                return 0;
+            }
+            var retired = new List<ulong>();
+            foreach (var (eventId, pending) in _closures)
+            {
+                if (pending.Generation == generation)
+                {
+                    retired.Add(eventId);
+                }
+            }
+            foreach (var eventId in retired)
+            {
+                _closures.Remove(eventId);
+                _dropped.Add(eventId);
+            }
+            _droppedClosures += retired.Count;
+            return retired.Count;
+        }
     }
 
     public void Dispose()
@@ -70,6 +196,7 @@ public sealed class CoreFunctionHandler : ICoreFunctionHandler, IDisposable
         {
             _disposed = true;
             _closures.Clear();
+            _dropped.Clear();
         }
         _objectSelf = NWScript.OBJECT_INVALID;
     }
@@ -86,12 +213,17 @@ public sealed class CoreFunctionHandler : ICoreFunctionHandler, IDisposable
             }
             var cancelled = _closures.Count;
             _closures.Clear();
+            _dropped.Clear();
             _disposed = true;
             return cancelled;
         }
     }
 
-    private void Schedule(uint obj, Action action, Func<ulong, int> nativeSchedule, string operation)
+    /// <summary>Schedules a closure that belongs to the host whichever generation is active, such as the frame closure.</summary>
+    internal void HostAssignCommand(uint obj, Action action) =>
+        Schedule(obj, action, ClosureKind.AssignCommand, 0, hostOwned: true);
+
+    private void Schedule(uint obj, Action action, ClosureKind kind, float duration, bool hostOwned)
     {
         AssertEngineThread();
         ArgumentNullException.ThrowIfNull(action);
@@ -102,19 +234,32 @@ public sealed class CoreFunctionHandler : ICoreFunctionHandler, IDisposable
             {
                 throw new ObjectDisposedException(nameof(CoreFunctionHandler));
             }
-            if (_closures.Count >= MaximumPendingClosures)
+            var generation = hostOwned ? HostGeneration : _schedulingGeneration;
+            if (generation != HostGeneration && _schedulingGenerationRetired)
             {
-                throw new InvalidOperationException($"NWN closure capacity ({MaximumPendingClosures}) was exhausted.");
+                // Leftover code of a retired generation: the closure would run retired code, so it is never scheduled.
+                _droppedClosures++;
+                return;
+            }
+            if (_maximumPendingClosures is { } maximum && _closures.Count >= maximum)
+            {
+                throw new InvalidOperationException($"NWN closure capacity ({maximum}) was exhausted.");
             }
             eventId = _nextEventId++;
-            _closures.Add(eventId, action);
+            _closures.Add(eventId, new PendingClosure(action, generation));
         }
-        if (nativeSchedule(eventId) != 0)
+        var scheduled = kind switch
+        {
+            ClosureKind.ActionDoCommand => _scheduler.ActionDoCommand(obj, eventId),
+            ClosureKind.AssignCommand => _scheduler.AssignCommand(obj, eventId),
+            _ => _scheduler.DelayCommand(obj, duration, eventId),
+        };
+        if (scheduled != 0)
         {
             return;
         }
         lock (_gate) _closures.Remove(eventId);
-        throw new InvalidOperationException($"NWNX rejected {operation} closure event {eventId} for object 0x{obj:X8}.");
+        throw new InvalidOperationException($"NWNX rejected {kind} closure event {eventId} for object 0x{obj:X8}.");
     }
 
     private void RestoreObjectSelf(uint value)
@@ -130,6 +275,15 @@ public sealed class CoreFunctionHandler : ICoreFunctionHandler, IDisposable
             throw new InvalidOperationException("NWN closure scheduling escaped the engine thread.");
         }
     }
+
+    private enum ClosureKind
+    {
+        ActionDoCommand,
+        AssignCommand,
+        DelayCommand,
+    }
+
+    private readonly record struct PendingClosure(Action Action, long Generation);
 
     private sealed class ObjectSelfScope(CoreFunctionHandler owner, uint previous) : IDisposable
     {

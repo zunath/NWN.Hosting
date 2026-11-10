@@ -47,6 +47,18 @@ of the generation's own assembly so its cache is collected with the generation, 
 `JsonSerializer.Serialize` and `Deserialize` call. Never call `JsonSerializer` on the default options from
 generation code. A guard test that refuses any call naming no options keeps the rule from eroding.
 
+## A pending closure
+
+**The mechanism.** `CoreFunctionHandler` is the host's and lives for the process. Every `DelayCommand`,
+`AssignCommand` and `ActionDoCommand` closure a generation schedules waits in it as a delegate of generation
+code until the engine calls it back, so a closure still pending when its generation retires roots the context;
+one that never fires (an action the engine dropped from a cleared queue) roots it forever, and one that fires
+later runs retired code after its generation was disposed.
+
+**What the host does.** A `ReloadHost` given the handler tags every closure with the generation that scheduled
+it and drops the retired generation's closures when it disposes the generation ([adopting.md](adopting.md),
+"Closures"). Without the handler nothing is dropped, so a host that reloads always passes it.
+
 ## Related
 
 - `threads-outlive-generations.md`: thread statics of collectible types and the keep-alive rule.

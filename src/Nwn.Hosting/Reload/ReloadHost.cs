@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using Nwn.Hosting.Bootstrap;
 using Nwn.Hosting.Contracts.Generations;
 
 namespace Nwn.Hosting.Reload;
@@ -17,17 +18,35 @@ public sealed class ReloadHost : IGenerationLiveness, IAsyncDisposable
     private LoadedGeneration? _active;
     private long _nextGeneration;
     private bool _restartRequired;
+    private bool _singleBuildLoaded;
 
     private readonly IHostServices? _hostServices;
     private readonly GenerationLoadOptions? _loadOptions;
+    private readonly CoreFunctionHandler? _closures;
 
     public ReloadHost(IPermanentNativeBindings native, IHostServices? hostServices = null, GenerationLoadOptions? loadOptions = null)
+        : this(native, hostServices, loadOptions, closures: null)
+    {
+    }
+
+    /// <param name="native">The engine-thread seam.</param>
+    /// <param name="hostServices">Process-lifetime singletons handed to every generation.</param>
+    /// <param name="loadOptions">How each generation loads; <see cref="GenerationLoadOptions.Default"/> when null.</param>
+    /// <param name="closures">
+    /// The host's closure handler (the one <see cref="NativeHost"/> hands the mode). When given, every closure scheduled
+    /// while a generation is active belongs to that generation, and the generation's pending closures are dropped
+    /// without running when it is disposed (<see cref="CoreFunctionHandler.RetireGeneration"/>), so a retired
+    /// generation's <c>DelayCommand</c>, <c>AssignCommand</c> or <c>ActionDoCommand</c> neither runs its code after
+    /// the dispose nor keeps its context loaded. Null keeps every closure as the host's, as the other constructor does.
+    /// </param>
+    public ReloadHost(IPermanentNativeBindings native, IHostServices? hostServices, GenerationLoadOptions? loadOptions, CoreFunctionHandler? closures)
     {
         ThreadPoolKeepAlive.Require();
         VirtualDispatchCacheSentinel.Seal();
         _native = native;
         _hostServices = hostServices;
         _loadOptions = loadOptions;
+        _closures = closures;
     }
 
     public long Generation => Volatile.Read(ref _nextGeneration);
@@ -64,6 +83,22 @@ public sealed class ReloadHost : IGenerationLiveness, IAsyncDisposable
             _native.Report("script-dispatch-failure", $"{scriptName}: {exception}");
             return false;
         }
+    }
+
+    /// <summary>
+    /// The run-script result of the active generation for <paramref name="scriptName"/>, for
+    /// <see cref="IHostMode.OnRunScriptResult"/>: <see cref="NativeHost.ScriptNotHandled"/> when
+    /// <see cref="TryDispatchScript(string, uint, out bool)"/> did not handle it, <see cref="NativeHost.ScriptConditionTrue"/>
+    /// when it handled it with a true conditional result, and <see cref="NativeHost.ScriptHandled"/> otherwise. Same
+    /// thread and failure rules as <see cref="TryDispatchScript(string, uint)"/>.
+    /// </summary>
+    public int DispatchScriptResult(string scriptName, uint objectSelf)
+    {
+        if (!TryDispatchScript(scriptName, objectSelf, out var conditionalResult))
+        {
+            return NativeHost.ScriptNotHandled;
+        }
+        return conditionalResult ? NativeHost.ScriptConditionTrue : NativeHost.ScriptHandled;
     }
 
     /// <summary>
@@ -121,11 +156,18 @@ public sealed class ReloadHost : IGenerationLiveness, IAsyncDisposable
             {
                 return Rejected("The previous post-teardown failure requires supervisor restart.");
             }
+            if (_singleBuildLoaded)
+            {
+                return Rejected("This host loads one non-collectible build for the life of the process (GenerationLoadOptions.Collectible is false); restart the server to load another.");
+            }
 
             var validationWatch = Stopwatch.StartNew();
             LoadedGeneration? candidate = null;
             try
             {
+                // A non-collectible build can never be unloaded, so this host never loads a second one, even when this
+                // one fails.
+                _singleBuildLoaded = _loadOptions is { Collectible: false };
                 candidate = LoadedGeneration.Load(assemblyPath, Interlocked.Increment(ref _nextGeneration), _loadOptions);
                 await candidate.Gameplay.ValidateAsync(cancellationToken).ConfigureAwait(false);
                 validationWatch.Stop();
@@ -213,13 +255,18 @@ public sealed class ReloadHost : IGenerationLiveness, IAsyncDisposable
                 if (previous is not null)
                 {
                     _active = null;
-                    previousContext = await DisposeWithoutRetainingAsync(previous, _native).ConfigureAwait(false);
+                    previousContext = await DisposeWithoutRetainingAsync(previous, _native, _closures).ConfigureAwait(false);
                     previous = null;
                 }
 
                 await _native.InvokeOnEngineThreadAsync(
-                    () => candidate.Gameplay.ActivateAsync(
-                        new GenerationActivation(candidate.Generation, _native, this, candidate.Execution, _hostServices), cancellationToken),
+                    () =>
+                    {
+                        // Closures the candidate schedules from its activation on are its own.
+                        _closures?.BeginGeneration(candidate.Generation);
+                        return candidate.Gameplay.ActivateAsync(
+                            new GenerationActivation(candidate.Generation, _native, this, candidate.Execution, _hostServices), cancellationToken);
+                    },
                     cancellationToken).ConfigureAwait(false);
                 _active = candidate;
                 applyWatch.Stop();
@@ -250,9 +297,10 @@ public sealed class ReloadHost : IGenerationLiveness, IAsyncDisposable
                 _native.Report("activation-failure", exception.ToString());
                 _active = null;
                 _restartRequired = true;
+                var candidateCollectible = candidate.IsCollectible;
                 var candidateContext = await TryDisposeAndUnloadAsync(candidate).ConfigureAwait(false);
                 var unloadWatch = Stopwatch.StartNew();
-                var collected = await LoadedGeneration.ProbeCollectedAsync(candidateContext).ConfigureAwait(false);
+                var collected = candidateCollectible && await LoadedGeneration.ProbeCollectedAsync(candidateContext).ConfigureAwait(false);
                 unloadWatch.Stop();
                 return new ReloadReport(
                     ReloadOutcome.RestartRequired,
@@ -284,9 +332,13 @@ public sealed class ReloadHost : IGenerationLiveness, IAsyncDisposable
                     () => _active.Gameplay.BeginQuiescenceAsync(CancellationToken.None), CancellationToken.None).ConfigureAwait(false);
                 await _active.Execution.DrainAsync(TimeSpan.FromSeconds(2), CancellationToken.None).ConfigureAwait(false);
                 await _active.Gameplay.DrainAsync(TimeSpan.FromSeconds(2), CancellationToken.None).ConfigureAwait(false);
-                var context = await _active.DisposeAndUnloadAsync(_native).ConfigureAwait(false);
+                var collectible = _active.IsCollectible;
+                var context = await _active.DisposeAndUnloadAsync(_native, _closures).ConfigureAwait(false);
                 _active = null;
-                _ = await LoadedGeneration.ProbeCollectedAsync(context).ConfigureAwait(false);
+                if (collectible)
+                {
+                    _ = await LoadedGeneration.ProbeCollectedAsync(context).ConfigureAwait(false);
+                }
             }
         }
         finally
@@ -346,17 +398,20 @@ public sealed class ReloadHost : IGenerationLiveness, IAsyncDisposable
         detail);
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static async ValueTask<WeakReference> DisposeWithoutRetainingAsync(LoadedGeneration generation, IPermanentNativeBindings native)
+    private static async ValueTask<WeakReference> DisposeWithoutRetainingAsync(
+        LoadedGeneration generation, IPermanentNativeBindings native, CoreFunctionHandler? closures)
     {
-        return await generation.DisposeAndUnloadAsync(native).ConfigureAwait(false);
+        return await generation.DisposeAndUnloadAsync(native, closures).ConfigureAwait(false);
     }
 
     private async ValueTask<bool> TryUnloadAndProbeAsync(LoadedGeneration generation)
     {
         try
         {
-            var context = await generation.DisposeAndUnloadAsync(_native).ConfigureAwait(false);
-            return await LoadedGeneration.ProbeCollectedAsync(context).ConfigureAwait(false);
+            var collectible = generation.IsCollectible;
+            var context = await generation.DisposeAndUnloadAsync(_native, _closures).ConfigureAwait(false);
+            // A non-collectible context is never collected; probing it would only spend ten blocking collections.
+            return collectible && await LoadedGeneration.ProbeCollectedAsync(context).ConfigureAwait(false);
         }
         catch (Exception exception)
         {
@@ -369,7 +424,7 @@ public sealed class ReloadHost : IGenerationLiveness, IAsyncDisposable
     {
         try
         {
-            return await generation.DisposeAndUnloadAsync(_native).ConfigureAwait(false);
+            return await generation.DisposeAndUnloadAsync(_native, _closures).ConfigureAwait(false);
         }
         catch (Exception exception)
         {

@@ -1,6 +1,6 @@
 namespace Nwn.Hosting.Reload;
 
-/// <summary>How a generation's collectible load context is named and which assemblies it shares with the host.</summary>
+/// <summary>How a generation's load context is named, which assemblies it shares with the host and whether it is collectible.</summary>
 public sealed record GenerationLoadOptions
 {
     /// <summary>The context name prefix used when a consumer gives none.</summary>
@@ -28,4 +28,12 @@ public sealed record GenerationLoadOptions
 
     /// <summary>The prefix of each collectible context's name.</summary>
     public string ContextNamePrefix { get; }
+
+    /// <summary>
+    /// Whether a generation loads into a collectible context, which a reload can unload. True by default. False loads
+    /// the build into a non-collectible context, which costs nothing for collectibility and can never be unloaded: a
+    /// <see cref="ReloadHost"/> with these options loads one build for the life of the process and rejects every later
+    /// reload. Meant for a server that runs with reload off.
+    /// </summary>
+    public bool Collectible { get; init; } = true;
 }

@@ -1,4 +1,6 @@
+using System.Runtime.InteropServices;
 using Nwn.Hosting.Bootstrap;
+using Nwn.Hosting.Testing.Fixtures;
 using Nwn.Hosting.Tests.Support;
 
 namespace Nwn.Hosting.Tests.Bootstrap;
@@ -6,7 +8,7 @@ namespace Nwn.Hosting.Tests.Bootstrap;
 /// <summary>
 /// The native registration cannot run outside a server, so these tests drive the parts of
 /// <see cref="NativeHost"/> around it: the initialization sequence with the registration injected, and the
-/// signal and main-loop handlers the unmanaged callbacks delegate to.
+/// signal, run-script and main-loop handlers the unmanaged callbacks delegate to.
 /// </summary>
 [TestClass]
 [TestCategory("Unit")]
@@ -15,6 +17,7 @@ public sealed class NativeHostTests
     private const string LogPrefix = "TESTHOST_NATIVE";
     private const string ModuleLoadFinish = "ON_MODULE_LOAD_FINISH";
     private const string DestroyServer = "ON_DESTROY_SERVER";
+    private const uint Creature = 0x02000001;
 
     private readonly List<string> _events = [];
     private TextWriter? _originalOut;
@@ -228,6 +231,125 @@ public sealed class NativeHostTests
         NativeHost.HandleMainLoop(9);
 
         CollectionAssert.AreEqual(new[] { "mode.OnDestroyServer", "first.BeginFrame" }, _events);
+    }
+
+    [TestMethod]
+    public void HandleRunScript_ReturnsTheResultOfAModeThatAnswersResults_WithObjectSelfSetDuringTheCall()
+    {
+        NativeHost.Initialize(new NativeHostOptions(LogPrefix, "mode", core => new ResultHostMode(core, _events)
+        {
+            Results = { ["cond_true"] = NativeHost.ScriptConditionTrue, ["cond_false"] = NativeHost.ScriptHandled, ["action"] = NativeHost.ScriptHandled },
+        }), _ => { });
+        _events.Clear();
+
+        Assert.AreEqual(1, RunScript("cond_true"), "A true conditional script must reach the engine as 1.");
+        Assert.AreEqual(0, RunScript("cond_false"));
+        Assert.AreEqual(0, RunScript("action"));
+        Assert.AreEqual(-1, RunScript("not_mine"), "An unhandled script must reach the engine as NWNX's ~0.");
+
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                "mode.OnRunScriptResult:cond_true@0x02000001", "mode.OnRunScriptResult:cond_false@0x02000001",
+                "mode.OnRunScriptResult:action@0x02000001", "mode.OnRunScriptResult:not_mine@0x02000001",
+            },
+            _events);
+    }
+
+    [TestMethod]
+    [DataRow(true, 0)]
+    [DataRow(false, -1)]
+    public void HandleRunScript_AModeThatAnswersOnlyWhetherItHandledTheScript_KeepsTheEarlierResults(bool handled, int expected)
+    {
+        Initialize(new RecordingHostMode(_events) { HandlesScripts = handled });
+        _events.Clear();
+
+        Assert.AreEqual(expected, RunScript("any_script"));
+        CollectionAssert.AreEqual(new[] { "mode.OnRunScript:any_script" }, _events);
+    }
+
+    [TestMethod]
+    public void HandleRunScript_WhenTheModeThrows_ReportsTheFailureAndLeavesTheScriptUnhandled()
+    {
+        NativeHost.Initialize(new NativeHostOptions(LogPrefix, "mode", core => new ResultHostMode(core, _events) { ThrowsFor = "broken" }), _ => { });
+        _events.Clear();
+
+        Assert.AreEqual(NativeHost.ScriptNotHandled, RunScript("broken"));
+        CollectionAssert.AreEqual(new[] { "mode.OnRunScriptResult:broken@0x02000001", "mode.OnCallbackFailure:run-script" }, _events);
+    }
+
+    [TestMethod]
+    public void HandleRunScript_WithoutAScriptNameOrAMode_IsNotHandled()
+    {
+        Assert.AreEqual(NativeHost.ScriptNotHandled, RunScript("before_initialize"));
+
+        Initialize(new RecordingHostMode(_events) { HandlesScripts = true });
+        _events.Clear();
+
+        Assert.AreEqual(NativeHost.ScriptNotHandled, NativeHost.HandleRunScript(IntPtr.Zero, Creature));
+        Assert.AreEqual(0, _events.Count, "The mode must not be asked about a missing script name.");
+    }
+
+    [TestMethod]
+    public void Initialize_GivesTheModeAClosureHandlerWithTheConfiguredLimit()
+    {
+        CoreFunctionHandler? unlimited = null;
+        NativeHost.Initialize(new NativeHostOptions(LogPrefix, "mode", core =>
+        {
+            unlimited = core;
+            return new RecordingHostMode(_events);
+        }) { MaximumPendingClosures = null }, _ => { });
+        NativeHost.ResetForTest();
+        CoreFunctionHandler? byDefault = null;
+        NativeHost.Initialize(new NativeHostOptions(LogPrefix, "mode", core =>
+        {
+            byDefault = core;
+            return new RecordingHostMode(_events);
+        }), _ => { });
+
+        Assert.IsNull(unlimited!.MaximumPendingClosures);
+        Assert.AreEqual(CoreFunctionHandler.DefaultMaximumPendingClosures, byDefault!.MaximumPendingClosures);
+    }
+
+    [TestMethod]
+    public void HandleMainLoop_TheFrameClosureBelongsToTheHost_SoRetiringAGenerationNeverStopsTheFrames()
+    {
+        var scheduler = new RecordingClosureScheduler();
+        CoreFunctionHandler? core = null;
+        var mode = new RecordingHostMode(_events) { RunsFrames = true };
+        NativeHost.Initialize(new NativeHostOptions(LogPrefix, "mode", created =>
+        {
+            core = created;
+            return mode;
+        }), _ => { }, scheduler);
+        NativeHost.HandleSignal(ModuleLoadFinish);
+        core!.BeginGeneration(1);
+        _events.Clear();
+
+        NativeHost.HandleMainLoop(5);
+        var dropped = core.RetireGeneration(1);
+        var frame = scheduler.Scheduled.Single();
+        core.Dispatch(frame.EventId, frame.Object);
+        NativeHost.HandleMainLoop(6);
+
+        Assert.AreEqual(0, dropped, "The frame closure must not be dropped with a generation.");
+        Assert.AreEqual(nameof(INativeClosureScheduler.AssignCommand), frame.Kind);
+        Assert.AreEqual(NativeHost.ModuleObject, frame.Object);
+        CollectionAssert.AreEqual(new[] { "mode.BeforeFrame", "mode.RunFrame:5", "mode.BeforeFrame" }, _events);
+        Assert.AreEqual(2, scheduler.Scheduled.Count, "The next frame must still be scheduled after a retirement.");
+    }
+
+    private static int RunScript(string script)
+    {
+        var pointer = Marshal.StringToCoTaskMemUTF8(script);
+        try
+        {
+            return NativeHost.HandleRunScript(pointer, Creature);
+        }
+        finally
+        {
+            Marshal.FreeCoTaskMem(pointer);
+        }
     }
 
     private void Initialize(RecordingHostMode mode, params string[] extensionNames)

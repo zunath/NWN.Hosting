@@ -52,4 +52,25 @@ public sealed class NativeHostOptionsTests
     {
         Assert.Throws<ArgumentNullException>(() => new NativeHostOptions("PREFIX", "mode", null!));
     }
+
+    [TestMethod]
+    public void MaximumPendingClosures_DefaultsTo64_AndTakesALimitOrNone()
+    {
+        var byDefault = new NativeHostOptions("PREFIX", "mode", _ => new RecordingHostMode([]));
+        var limited = byDefault with { MaximumPendingClosures = 4096 };
+        var unlimited = byDefault with { MaximumPendingClosures = null };
+
+        Assert.AreEqual(64, byDefault.MaximumPendingClosures);
+        Assert.AreEqual(4096, limited.MaximumPendingClosures);
+        Assert.IsNull(unlimited.MaximumPendingClosures);
+    }
+
+    [TestMethod]
+    [DataRow(0)]
+    [DataRow(-5)]
+    public void AZeroOrNegativeClosureLimitIsRefused(int limit)
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new NativeHostOptions("PREFIX", "mode", _ => new RecordingHostMode([])) { MaximumPendingClosures = limit });
+    }
 }

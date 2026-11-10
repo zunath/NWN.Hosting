@@ -33,4 +33,25 @@ public sealed record NativeHostOptions
 
     /// <summary>Native hooks installed in list order after the host's own.</summary>
     public IReadOnlyList<INativeHostExtension> Extensions { get; }
+
+    /// <summary>
+    /// How many closures the host's <see cref="CoreFunctionHandler"/> lets wait for their callback at once; null for
+    /// no limit. Defaults to <see cref="CoreFunctionHandler.DefaultMaximumPendingClosures"/>. Scheduling a closure
+    /// beyond the limit throws.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The value is zero or negative.</exception>
+    public int? MaximumPendingClosures
+    {
+        get => _maximumPendingClosures;
+        init
+        {
+            if (value is <= 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(MaximumPendingClosures), value, "The limit must be positive, or null for no limit.");
+            }
+            _maximumPendingClosures = value;
+        }
+    }
+
+    private readonly int? _maximumPendingClosures = CoreFunctionHandler.DefaultMaximumPendingClosures;
 }

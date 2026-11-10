@@ -5,8 +5,9 @@ Test doubles and retired-generation assertions for code built on `Nwn.Hosting`. 
 | Type | Role |
 |---|---|
 | `SingleThreadDispatcher` | A dedicated thread that stands in for the NWN engine thread. Like the engine thread it never exits, because a thread that ran generation code and exits makes the runtime free live objects. |
-| `FixtureNativeBindings` | An `IPermanentNativeBindings` on that thread with callback registrations a test can queue and execute, so it can show a retired generation's callbacks never run. A fixture generation reaches the registrations through `IFixtureCallbackBindings`. |
+| `FixtureNativeBindings` | An `IPermanentNativeBindings` on that thread with callback registrations a test can queue and execute, so it can show a retired generation's callbacks never run. A fixture generation reaches the registrations through `IFixtureCallbackBindings`. `EngineThreadId` is the thread's id, for a `CoreFunctionHandler` the test drives on it. |
 | `RecordingNativeBindings` | Runs engine-thread work inline and records every `Report` call by category. |
+| `RecordingClosureScheduler` | An `INativeClosureScheduler` that records each closure (`ScheduledClosure`: kind, object, delay, event id) instead of calling NWNX, so a test can build a `CoreFunctionHandler` without a server and deliver the engine's callbacks itself (`CoreFunctionHandler.Dispatch`), for example to show a retired generation's closures never run and do not keep it loaded. |
 | `TestObjectSelfScope` | Restores a stand-in `OBJECT_SELF` on dispose. |
 | `VirtualDispatchCacheInspector` | Reads the runtime's generic-virtual-dispatch cache so a test can see whether its flush sentinel holds an entry. |
 | `TestAssertions` | `Require`, `RequireThrows`, `RequireThrowsAsync` and `RequireNoRetainedContexts`, throwing `HostingAssertionException`. |

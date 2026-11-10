@@ -25,10 +25,13 @@ internal sealed class RecordingHostMode(List<string> events) : IHostMode
 
     public void RunFrame(ulong frame) => events.Add($"mode.RunFrame:{frame}");
 
+    /// <summary>What <see cref="OnRunScript"/> answers; false (not handled) unless a test sets it.</summary>
+    public bool HandlesScripts { get; set; }
+
     public bool OnRunScript(string script, uint objectSelf)
     {
         events.Add($"mode.OnRunScript:{script}");
-        return false;
+        return HandlesScripts;
     }
 
     public void OnSignal(string signal) => events.Add($"mode.OnSignal:{signal}");

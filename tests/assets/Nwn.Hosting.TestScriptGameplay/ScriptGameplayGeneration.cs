@@ -13,7 +13,8 @@ namespace Nwn.Hosting.Reload.ScriptGameplay;
 /// <c>"nh_cond_true"</c> and <c>"nh_cond_false"</c> are conditional scripts with a fixed result, and
 /// <c>"nh_schedule_closure"</c> schedules a <c>DelayCommand</c> closure through the host's
 /// <see cref="ICoreFunctionHandler"/> (resolved from the host services) that reports
-/// <c>"&lt;generation&gt;:&lt;sequence&gt;"</c> under <c>"closure-ran"</c> when it runs.
+/// <c>"&lt;generation&gt;:&lt;sequence&gt;"</c> under <c>"closure-ran"</c> when it runs. Activation and disposal
+/// report the generation under <c>"generation-activated"</c> and <c>"generation-disposed"</c>.
 /// </summary>
 public sealed class ScriptGameplayGeneration : IGameplayGeneration
 {
@@ -23,6 +24,8 @@ public sealed class ScriptGameplayGeneration : IGameplayGeneration
     public const string ConditionalFalseScriptName = "nh_cond_false";
     public const string ScheduleClosureScriptName = "nh_schedule_closure";
     public const string ClosureRanCategory = "closure-ran";
+    public const string ActivatedCategory = "generation-activated";
+    public const string DisposedCategory = "generation-disposed";
 
     private GenerationActivation? _activation;
 
@@ -35,6 +38,7 @@ public sealed class ScriptGameplayGeneration : IGameplayGeneration
         _activation = activation;
         Scripts = new Dispatcher(activation);
         MainLoop = new Sink(activation);
+        activation.Native.Report(ActivatedCategory, activation.Generation.ToString());
         return ValueTask.CompletedTask;
     }
 
@@ -44,6 +48,7 @@ public sealed class ScriptGameplayGeneration : IGameplayGeneration
 
     public ValueTask DisposeAsync()
     {
+        _activation?.Native.Report(DisposedCategory, _activation.Generation.ToString());
         Scripts = null;
         MainLoop = null;
         _activation = null;

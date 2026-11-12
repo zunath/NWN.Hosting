@@ -27,12 +27,63 @@ A consumer's own NWNX function hooks stay in its host project and plug in as `IN
 
 - `Install` once during `Initialize`, after the NWNX callbacks and closure-stack release are registered
   and before the mode starts.
-- `BeginFrame` on every main-loop callback, before the host schedules the frame.
+- `BeginFrame` on every main-loop callback, before the host delivers the frame.
 - `OnModuleLoaded` on `ON_MODULE_LOAD_FINISH`, before the module counts as loaded.
 
 A hook installed this way lives for the whole process. Native code holds its function pointer, so its
 code cannot be reloaded; a hook whose behaviour must change with gameplay code forwards to the active
 generation through a contract and keeps the engine's own behaviour when no generation answers.
+
+## Moving from your own NWNX DotNET handlers
+
+A server that registered its own handlers with NWNX DotNET and let NWN.Core handle closures ran its frame
+work at the start of the engine's main loop with `OBJECT_SELF` invalid, and its rejected closures were
+dropped silently. The packages default to something else, which changes what players and saved data see.
+Such a server sets both settings below, and usually `MaximumPendingClosures = null` (see Closures):
+
+```csharp
+NativeHost.Initialize(new NativeHostOptions(logPrefix, modeName, createMode, extensions)
+{
+    FrameDelivery = FrameDelivery.Inline,
+    RejectedClosures = RejectedClosureHandling.Drop,
+    MaximumPendingClosures = null,
+});
+```
+
+A server written for the packages from the start keeps the defaults.
+
+## Frame delivery
+
+NWNX DotNET calls the main-loop handler at the start of every iteration of the engine's main loop, from
+the first iteration on, inside a script context it pushes with `OBJECT_SELF` = `OBJECT_INVALID`.
+`NativeHostOptions.FrameDelivery` decides how `NativeHost` hands that callback to the mode:
+
+- `FrameDelivery.ModuleClosure` (the default): once `ON_MODULE_LOAD_FINISH` has arrived, each callback
+  schedules one closure assigned to the module, and `IHostMode.RunFrame` runs when the engine runs it, later
+  in the same iteration during the AI master's event pass, with the module as `OBJECT_SELF`. No frame runs
+  before the module has loaded.
+- `FrameDelivery.Inline`: each callback calls `IHostMode.BeforeFrame` and `RunFrame` directly, inside the
+  NWNX callback, from the first one (before the module has loaded too), with `OBJECT_SELF` =
+  `OBJECT_INVALID` and no closure.
+
+The choice shows wherever frame work touches the engine. Under the module closure, an `AssignCommand`,
+`DelayCommand` or `ActionDoCommand` that frame work aims at `OBJECT_SELF` targets the module and runs;
+inline, NWNX refuses it because the object is invalid (see rejected closures below). Frame work also runs at
+a different point of the loop, and work counted in frames starts with the first frame instead of the module
+load.
+
+Failures are reported the same way under both. An exception from an extension's `BeginFrame` or from
+`BeforeFrame` goes to `IHostMode.OnFrameScheduleFailure`; one that escapes `RunFrame` goes to
+`IHostMode.OnCallbackFailure`, with the phase `closure` under the module closure and `main-loop` inline.
+The host contains the exception and the next callback delivers the next frame, so the server keeps
+running unless the mode stops itself.
+
+A reload behaves the same under both. Its engine-thread steps (quiescence, the retired generation's dispose
+and closure drop, the next generation's activation) wait on `NativeBindings` until the mode pumps it in
+`RunFrame`, so with a mode that pumps before it calls `ReloadHost.PumpMainLoop`, a generation changes only
+inside a frame's pump and never while a frame ticks one. `ReloadHost` stops forwarding to the retired
+generation before it queues the dispose, so its `IMainLoopSink` is never called after its dispose, and an
+inline frame holds no closure that could keep anything loaded.
 
 ## Script results
 
@@ -70,6 +121,21 @@ if it fires, runs its code after the generation was disposed ([generation-leaks.
 
 Host code that schedules a closure while a generation is active gives it to that generation; keep host
 code to engine work that needs no closure.
+
+NWNX refuses a closure whose object is not valid (it returns 0), for example one aimed at a creature that
+is already gone or at `OBJECT_SELF` in an inline frame. `NativeHostOptions.RejectedClosures` decides what
+the scheduling call then does:
+
+- `RejectedClosureHandling.Throw` (the default): it throws `InvalidOperationException` into the code that
+  called `AssignCommand`, `DelayCommand` or `ActionDoCommand`.
+- `RejectedClosureHandling.Drop`: it returns normally and the closure never runs, as NWN.Core's own closure
+  handling does.
+
+Either way the handler forgets the refused closure at once: it holds no capacity, keeps no generation
+loaded, and is counted in `CoreFunctionHandler.RejectedClosureCount`. A server whose gameplay code was
+written against NWN.Core's handling chooses `Drop`; otherwise every such call becomes an exception in
+gameplay code. The host's own frame closure is never dropped: if the engine refuses it,
+`OnFrameScheduleFailure` reports it and the next callback schedules the frame again.
 
 ## Loading generations
 

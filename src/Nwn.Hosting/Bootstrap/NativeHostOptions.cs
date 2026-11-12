@@ -53,5 +53,45 @@ public sealed record NativeHostOptions
         }
     }
 
+    /// <summary>
+    /// How each main-loop callback reaches the mode: <see cref="Bootstrap.FrameDelivery.ModuleClosure"/> (the default)
+    /// runs the frame in a closure assigned to the module once the module has loaded;
+    /// <see cref="Bootstrap.FrameDelivery.Inline"/> runs it inside the callback itself, from the first one.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The value is not a defined <see cref="Bootstrap.FrameDelivery"/>.</exception>
+    public FrameDelivery FrameDelivery
+    {
+        get => _frameDelivery;
+        init
+        {
+            if (!Enum.IsDefined(value))
+            {
+                throw new ArgumentOutOfRangeException(nameof(FrameDelivery), value, "Not a defined frame delivery.");
+            }
+            _frameDelivery = value;
+        }
+    }
+
+    /// <summary>
+    /// What the host's <see cref="CoreFunctionHandler"/> does with a closure the engine refuses:
+    /// <see cref="RejectedClosureHandling.Throw"/> (the default) throws from the scheduling call;
+    /// <see cref="RejectedClosureHandling.Drop"/> forgets it without running it and returns normally.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The value is not a defined <see cref="RejectedClosureHandling"/>.</exception>
+    public RejectedClosureHandling RejectedClosures
+    {
+        get => _rejectedClosures;
+        init
+        {
+            if (!Enum.IsDefined(value))
+            {
+                throw new ArgumentOutOfRangeException(nameof(RejectedClosures), value, "Not a defined rejected-closure handling.");
+            }
+            _rejectedClosures = value;
+        }
+    }
+
     private readonly int? _maximumPendingClosures = CoreFunctionHandler.DefaultMaximumPendingClosures;
+    private readonly FrameDelivery _frameDelivery = FrameDelivery.ModuleClosure;
+    private readonly RejectedClosureHandling _rejectedClosures = RejectedClosureHandling.Throw;
 }

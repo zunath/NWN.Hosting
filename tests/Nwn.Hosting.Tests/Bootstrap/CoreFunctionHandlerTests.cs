@@ -131,6 +131,81 @@ public sealed class CoreFunctionHandlerTests
     }
 
     [TestMethod]
+    public void RejectedClosures_ThrowByDefault_AndEveryRefusalIsCounted()
+    {
+        var handler = Create(null);
+        _scheduler.Refuse = true;
+
+        Assert.Throws<InvalidOperationException>(() => handler.ClosureAssignCommand(Creature, () => { }));
+        Assert.Throws<InvalidOperationException>(() => handler.ClosureActionDoCommand(Creature, () => { }));
+
+        Assert.AreEqual(RejectedClosureHandling.Throw, handler.RejectedClosureHandling);
+        Assert.AreEqual(RejectedClosureHandling.Throw, new CoreFunctionHandler(Environment.CurrentManagedThreadId).RejectedClosureHandling);
+        Assert.AreEqual(RejectedClosureHandling.Throw, new CoreFunctionHandler(Environment.CurrentManagedThreadId, null).RejectedClosureHandling);
+        Assert.AreEqual(2, handler.RejectedClosureCount);
+        Assert.AreEqual(0, handler.PendingCount);
+    }
+
+    [TestMethod]
+    [DataRow("ActionDoCommand")]
+    [DataRow("AssignCommand")]
+    [DataRow("DelayCommand")]
+    public void UnderDrop_AClosureTheEngineRefuses_IsForgottenNeverRunsAndDoesNotThrow(string kind)
+    {
+        var handler = CreateDropping(1);
+        var ran = 0;
+        _scheduler.Refuse = true;
+
+        for (var index = 0; index < 5; index++)
+        {
+            Schedule(handler, kind, () => ran++);
+        }
+        _scheduler.Refuse = false;
+        Schedule(handler, kind, () => ran += 100);
+        var accepted = _scheduler.Scheduled.Single();
+        handler.Dispatch(accepted.EventId, Creature);
+
+        Assert.AreEqual(kind, accepted.Kind);
+        Assert.AreEqual(100, ran, "Only the accepted closure may run.");
+        Assert.AreEqual(5, handler.RejectedClosureCount);
+        Assert.AreEqual(0, handler.PendingCount, "A refused closure must not hold a slot: the limit of one still took the accepted closure.");
+        Assert.AreEqual(0, handler.DroppedClosures, "A refusal is not a retired generation's drop.");
+        Assert.IsFalse(_console.ToString().Contains("ignored stale event", StringComparison.Ordinal));
+    }
+
+    [TestMethod]
+    public void UnderDrop_AGenerationsRefusedClosureIsNotKept_SoRetiringTheGenerationDropsNothing()
+    {
+        var handler = CreateDropping(null);
+        handler.BeginGeneration(1);
+        _scheduler.Refuse = true;
+        handler.ClosureDelayCommand(Creature, 1, () => Assert.Fail("A refused closure must never run."));
+
+        Assert.AreEqual(0, handler.RetireGeneration(1));
+        Assert.AreEqual(1, handler.RejectedClosureCount);
+        Assert.AreEqual(0, handler.PendingCount);
+    }
+
+    [TestMethod]
+    public void UnderDrop_AHostClosureTheEngineRefuses_StillThrows()
+    {
+        var handler = CreateDropping(null);
+        _scheduler.Refuse = true;
+
+        Assert.Throws<InvalidOperationException>(() => handler.HostAssignCommand(NativeHost.ModuleObject, () => { }));
+
+        Assert.AreEqual(1, handler.RejectedClosureCount);
+        Assert.AreEqual(0, handler.PendingCount);
+    }
+
+    [TestMethod]
+    public void AnUndefinedRejectedClosureHandling_IsRefused()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new CoreFunctionHandler(Environment.CurrentManagedThreadId, null, _scheduler, (RejectedClosureHandling)7));
+    }
+
+    [TestMethod]
     public void BeforeAnyGenerationBegins_ClosuresBelongToTheHostAndSurviveARetirement()
     {
         var handler = Create(null);
@@ -272,4 +347,23 @@ public sealed class CoreFunctionHandlerTests
 
     private CoreFunctionHandler Create(int? maximumPendingClosures) =>
         new(Environment.CurrentManagedThreadId, maximumPendingClosures, _scheduler);
+
+    private CoreFunctionHandler CreateDropping(int? maximumPendingClosures) =>
+        new(Environment.CurrentManagedThreadId, maximumPendingClosures, _scheduler, RejectedClosureHandling.Drop);
+
+    private static void Schedule(CoreFunctionHandler handler, string kind, Action action)
+    {
+        switch (kind)
+        {
+            case "ActionDoCommand":
+                handler.ClosureActionDoCommand(Creature, action);
+                break;
+            case "AssignCommand":
+                handler.ClosureAssignCommand(Creature, action);
+                break;
+            default:
+                handler.ClosureDelayCommand(Creature, 1, action);
+                break;
+        }
+    }
 }

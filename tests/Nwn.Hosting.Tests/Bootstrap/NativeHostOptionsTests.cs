@@ -73,4 +73,33 @@ public sealed class NativeHostOptionsTests
         Assert.Throws<ArgumentOutOfRangeException>(() =>
             new NativeHostOptions("PREFIX", "mode", _ => new RecordingHostMode([])) { MaximumPendingClosures = limit });
     }
+
+    [TestMethod]
+    public void FrameDelivery_DefaultsToTheModuleClosure_AndTakesInline()
+    {
+        var byDefault = new NativeHostOptions("PREFIX", "mode", _ => new RecordingHostMode([]));
+        var inline = byDefault with { FrameDelivery = FrameDelivery.Inline };
+
+        Assert.AreEqual(FrameDelivery.ModuleClosure, byDefault.FrameDelivery);
+        Assert.AreEqual(FrameDelivery.Inline, inline.FrameDelivery);
+    }
+
+    [TestMethod]
+    public void RejectedClosures_DefaultToThrow_AndTakeDrop()
+    {
+        var byDefault = new NativeHostOptions("PREFIX", "mode", _ => new RecordingHostMode([]));
+        var dropping = byDefault with { RejectedClosures = RejectedClosureHandling.Drop };
+
+        Assert.AreEqual(RejectedClosureHandling.Throw, byDefault.RejectedClosures);
+        Assert.AreEqual(RejectedClosureHandling.Drop, dropping.RejectedClosures);
+    }
+
+    [TestMethod]
+    public void UndefinedFrameDeliveryOrRejectedClosureValuesAreRefused()
+    {
+        var options = new NativeHostOptions("PREFIX", "mode", _ => new RecordingHostMode([]));
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => options with { FrameDelivery = (FrameDelivery)2 });
+        Assert.Throws<ArgumentOutOfRangeException>(() => options with { RejectedClosures = (RejectedClosureHandling)(-1) });
+    }
 }

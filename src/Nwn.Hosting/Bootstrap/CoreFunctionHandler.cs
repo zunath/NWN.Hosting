@@ -21,6 +21,13 @@ namespace Nwn.Hosting.Bootstrap;
 /// At most <see cref="MaximumPendingClosures"/> closures may wait for their callback at once
 /// (<see cref="DefaultMaximumPendingClosures"/> unless the consumer chose another limit or none).
 /// </para>
+/// <para>
+/// A closure the engine refuses (the scheduler returns 0) is forgotten at once: it never runs, holds no capacity and
+/// keeps no generation loaded. <see cref="RejectedClosureHandling"/> decides whether the scheduling call then throws
+/// (<see cref="Bootstrap.RejectedClosureHandling.Throw"/>, the default) or returns normally
+/// (<see cref="Bootstrap.RejectedClosureHandling.Drop"/>); <see cref="RejectedClosureCount"/> counts refusals either way.
+/// The host's own frame closure always throws when refused.
+/// </para>
 /// </remarks>
 public sealed class CoreFunctionHandler : ICoreFunctionHandler, IDisposable
 {
@@ -34,6 +41,7 @@ public sealed class CoreFunctionHandler : ICoreFunctionHandler, IDisposable
     private readonly int _engineThreadId;
     private readonly int? _maximumPendingClosures;
     private readonly INativeClosureScheduler _scheduler;
+    private readonly RejectedClosureHandling _rejectedClosureHandling;
     private readonly Dictionary<ulong, PendingClosure> _closures = [];
     // The event ids of dropped closures whose callback has not arrived yet, so it is ignored quietly. An action the
     // engine discards never calls back and keeps its id here: eight bytes, and only on a host that retires generations.
@@ -43,6 +51,7 @@ public sealed class CoreFunctionHandler : ICoreFunctionHandler, IDisposable
     private long _schedulingGeneration = HostGeneration;
     private bool _schedulingGenerationRetired;
     private long _droppedClosures;
+    private long _rejectedClosures;
     private bool _disposed;
 
     /// <summary>Creates a handler that allows <see cref="DefaultMaximumPendingClosures"/> pending closures.</summary>
@@ -62,15 +71,33 @@ public sealed class CoreFunctionHandler : ICoreFunctionHandler, IDisposable
     /// <param name="maximumPendingClosures">How many closures may wait for their callback at once; null for no limit.</param>
     /// <param name="scheduler">Hands each closure's event id to the engine; the other constructors use NWNX DotNET.</param>
     public CoreFunctionHandler(int engineThreadId, int? maximumPendingClosures, INativeClosureScheduler scheduler)
+        : this(engineThreadId, maximumPendingClosures, scheduler, RejectedClosureHandling.Throw)
+    {
+    }
+
+    /// <param name="engineThreadId">The managed id of the NWN engine thread; scheduling, dispatch and the generation calls must run on it.</param>
+    /// <param name="maximumPendingClosures">How many closures may wait for their callback at once; null for no limit.</param>
+    /// <param name="scheduler">Hands each closure's event id to the engine; the other constructors use NWNX DotNET.</param>
+    /// <param name="rejectedClosureHandling">
+    /// Whether scheduling a closure the engine refuses throws (<see cref="Bootstrap.RejectedClosureHandling.Throw"/>, what the
+    /// other constructors choose) or returns normally (<see cref="Bootstrap.RejectedClosureHandling.Drop"/>).
+    /// </param>
+    public CoreFunctionHandler(
+        int engineThreadId, int? maximumPendingClosures, INativeClosureScheduler scheduler, RejectedClosureHandling rejectedClosureHandling)
     {
         if (maximumPendingClosures is <= 0)
         {
             throw new ArgumentOutOfRangeException(nameof(maximumPendingClosures), maximumPendingClosures, "The limit must be positive, or null for no limit.");
         }
         ArgumentNullException.ThrowIfNull(scheduler);
+        if (!Enum.IsDefined(rejectedClosureHandling))
+        {
+            throw new ArgumentOutOfRangeException(nameof(rejectedClosureHandling), rejectedClosureHandling, "Not a defined rejected-closure handling.");
+        }
         _engineThreadId = engineThreadId;
         _maximumPendingClosures = maximumPendingClosures;
         _scheduler = scheduler;
+        _rejectedClosureHandling = rejectedClosureHandling;
     }
 
     public uint ObjectSelf => _objectSelf;
@@ -88,6 +115,15 @@ public sealed class CoreFunctionHandler : ICoreFunctionHandler, IDisposable
     /// generation retired, and those a retired generation scheduled afterwards.
     /// </summary>
     public long DroppedClosures { get { lock (_gate) return _droppedClosures; } }
+
+    /// <summary>What scheduling a closure the engine refuses does: throw (the default) or return normally.</summary>
+    public RejectedClosureHandling RejectedClosureHandling => _rejectedClosureHandling;
+
+    /// <summary>
+    /// How many closures the engine refused since the handler was created, the host's own included. None of them ran or
+    /// is still held; under <see cref="Bootstrap.RejectedClosureHandling.Throw"/> each scheduling call also threw.
+    /// </summary>
+    public long RejectedClosureCount { get { lock (_gate) return _rejectedClosures; } }
 
     public void ClosureActionDoCommand(uint obj, Action action) =>
         Schedule(obj, action, ClosureKind.ActionDoCommand, 0, hostOwned: false);
@@ -258,8 +294,30 @@ public sealed class CoreFunctionHandler : ICoreFunctionHandler, IDisposable
         {
             return;
         }
-        lock (_gate) _closures.Remove(eventId);
+        lock (_gate)
+        {
+            // The engine never calls back for a refused closure, so nothing keeps its event id or its delegate.
+            _closures.Remove(eventId);
+            _rejectedClosures++;
+        }
+        // The host's own closures (the frame closure) always throw: dropping one silently would stop every later frame.
+        if (_rejectedClosureHandling == RejectedClosureHandling.Drop && !hostOwned)
+        {
+            return;
+        }
         throw new InvalidOperationException($"NWNX rejected {kind} closure event {eventId} for object 0x{obj:X8}.");
+    }
+
+    /// <summary>
+    /// Makes <paramref name="objectSelf"/> the current <c>OBJECT_SELF</c> and returns the previous one, without the
+    /// allocation of <see cref="EnterObjectSelf"/>; the caller restores the previous value the same way.
+    /// </summary>
+    internal uint ExchangeObjectSelf(uint objectSelf)
+    {
+        AssertEngineThread();
+        var previous = _objectSelf;
+        _objectSelf = objectSelf;
+        return previous;
     }
 
     private void RestoreObjectSelf(uint value)

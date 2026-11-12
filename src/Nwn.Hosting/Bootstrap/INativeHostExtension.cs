@@ -15,6 +15,9 @@ public interface INativeHostExtension
     /// <summary>Runs when the <c>ON_MODULE_LOAD_FINISH</c> signal arrives, before the host marks the module finished.</summary>
     void OnModuleLoaded() { }
 
-    /// <summary>Runs at the start of every main-loop callback, before the host's own frame handling.</summary>
+    /// <summary>
+    /// Runs at the start of every main-loop callback, before the host's own frame handling (and so before an inline
+    /// frame), also before the module has loaded.
+    /// </summary>
     void BeginFrame() { }
 }

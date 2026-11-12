@@ -16,7 +16,7 @@
        -p:NwnHostingVersion=...). Inter-package dependencies resolve to this same version
        because they are ProjectReferences packed from the same build. -->
   <PropertyGroup>
-    <NwnHostingVersion Condition="'$(NwnHostingVersion)' == ''">0.1.0-preview.2</NwnHostingVersion>
+    <NwnHostingVersion Condition="'$(NwnHostingVersion)' == ''">0.1.0-preview.3</NwnHostingVersion>
     <Version Condition="'$(Version)' == ''">$(NwnHostingVersion)</Version>
   </PropertyGroup>
 

@@ -131,6 +131,52 @@ public sealed class ReloadHostClosureTests
         CollectionAssert.AreEqual(new[] { $"generation={report.ActiveGeneration} dropped=2" }, native.Messages("closures-dropped").ToArray());
     }
 
+    [TestMethod]
+    public async Task UnderDrop_ClosuresTheEngineRefuses_AreNotKeptRunOrThrown_AndTheirGenerationUnloads()
+    {
+        await using var native = new FixtureNativeBindings();
+        var scheduler = new RecordingClosureScheduler { Refuse = true };
+        var closures = new CoreFunctionHandler(native.EngineThreadId, null, scheduler, RejectedClosureHandling.Drop);
+        await using var host = new ReloadHost(native, HostServicesFor(closures), null, closures);
+        var first = await host.ReloadAsync(ScriptGameplayAssemblyPath(), DrainTimeout);
+        Require(first.Outcome == ReloadOutcome.Applied, first.Detail);
+
+        // Each scheduling script must still count as handled: under Drop the refusal does not throw into gameplay code.
+        await ScheduleClosuresAsync(native, host, 3);
+        var second = await host.ReloadAsync(ScriptGameplayAssemblyPath(), DrainTimeout);
+        Require(second.Outcome == ReloadOutcome.Applied, second.Detail);
+
+        Require(scheduler.Scheduled.Count == 0, "No refused closure may reach the engine's queue.");
+        Require(closures.PendingCount == 0 && closures.RejectedClosureCount == 3 && closures.DroppedClosures == 0,
+            $"pending={closures.PendingCount} rejected={closures.RejectedClosureCount} dropped={closures.DroppedClosures}");
+        Require(native.Count(ScriptGameplayGeneration.ClosureRanCategory) == 0, "A refused closure must never run.");
+        Require(native.Count("script-dispatch-failure") == 0, "A refused closure must not fail the script that scheduled it.");
+        Require(native.Count("closures-dropped") == 0, "Nothing of the retired generation was still pending.");
+
+        await Task.Delay(40);
+        var probe = await host.ProbeRetiredContextsAsync();
+        RequireNoRetainedContexts(probe, "A retired generation whose closures the engine refused");
+        Require(probe.ProbedContexts == 1 && probe.CollectedContexts == 1, $"probed={probe.ProbedContexts} collected={probe.CollectedContexts}");
+    }
+
+    [TestMethod]
+    public async Task UnderThrow_AClosureTheEngineRefuses_StillFailsTheScriptThatScheduledIt()
+    {
+        await using var native = new FixtureNativeBindings();
+        var scheduler = new RecordingClosureScheduler { Refuse = true };
+        var closures = new CoreFunctionHandler(native.EngineThreadId, null, scheduler);
+        await using var host = new ReloadHost(native, HostServicesFor(closures), null, closures);
+        var report = await host.ReloadAsync(ScriptGameplayAssemblyPath(), DrainTimeout);
+        Require(report.Outcome == ReloadOutcome.Applied, report.Detail);
+
+        var handled = true;
+        await OnEngineAsync(native, () => handled = host.TryDispatchScript(ScriptGameplayGeneration.ScheduleClosureScriptName, ObjectSelf));
+
+        Require(!handled, "Under Throw the refusal throws into the scheduling script, which the host reports as not handled.");
+        Require(native.Count("script-dispatch-failure") == 1, "The refusal must be reported as a dispatch failure.");
+        Require(closures.PendingCount == 0 && closures.RejectedClosureCount == 1, $"pending={closures.PendingCount} rejected={closures.RejectedClosureCount}");
+    }
+
     private static TestHostServices HostServicesFor(CoreFunctionHandler closures) =>
         new TestHostServices().Add(typeof(ICoreFunctionHandler), closures);
 

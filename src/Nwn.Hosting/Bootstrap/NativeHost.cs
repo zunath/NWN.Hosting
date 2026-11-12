@@ -8,14 +8,16 @@ namespace Nwn.Hosting.Bootstrap;
 /// The permanent NWNX DotNET host. A consumer's own parameterless entry point (the method NWNX DotNET
 /// is configured to call) passes its <see cref="NativeHostOptions"/> to
 /// <see cref="Initialize(NativeHostOptions)"/>. The host registers the native callbacks, routes NWN.Core
-/// closures, runs every main-loop frame inside a module closure, and hands everything else to the
-/// <see cref="IHostMode"/> the options create. Every unmanaged callback contains its own exceptions.
+/// closures, delivers every main-loop frame to the mode (inside a module closure by default, or inside the main-loop
+/// callback itself; see <see cref="FrameDelivery"/>), and hands everything else to the <see cref="IHostMode"/> the
+/// options create. Every unmanaged callback contains its own exceptions.
 /// </summary>
 public static class NativeHost
 {
     /// <summary>
-    /// The module's object id. It equals the VM's <c>OBJECT_SELF</c> constant, so a frame runs inside
-    /// a closure assigned to the module to get the module's script context.
+    /// The module's object id. It equals the VM's <c>OBJECT_SELF</c> constant, so under
+    /// <see cref="FrameDelivery.ModuleClosure"/> a frame runs inside a closure assigned to the module to get the module's
+    /// script context.
     /// </summary>
     public const uint ModuleObject = 0x00000000;
 
@@ -34,11 +36,13 @@ public static class NativeHost
     private const string DefaultLogPrefix = "NWN_HOSTING_NATIVE";
     private const string ModuleLoadFinishSignal = "ON_MODULE_LOAD_FINISH";
     private const string DestroyServerSignal = "ON_DESTROY_SERVER";
+    private const string InlineFramePhase = "main-loop";
 
     private static CoreFunctionHandler? _coreFunctions;
     private static IHostMode? _mode;
     private static INativeHostExtension[] _extensions = [];
     private static volatile string _logPrefix = DefaultLogPrefix;
+    private static FrameDelivery _frameDelivery = FrameDelivery.ModuleClosure;
     private static int _bootstrapped;
     private static int _moduleFinished;
     private static int _destroyed;
@@ -66,10 +70,14 @@ public static class NativeHost
 
         _logPrefix = options.LogPrefix;
         _extensions = [.. options.Extensions];
+        _frameDelivery = options.FrameDelivery;
         try
         {
             var coreFunctions = new CoreFunctionHandler(
-                Environment.CurrentManagedThreadId, options.MaximumPendingClosures, closureScheduler ?? NwnxClosureScheduler.Instance);
+                Environment.CurrentManagedThreadId,
+                options.MaximumPendingClosures,
+                closureScheduler ?? NwnxClosureScheduler.Instance,
+                options.RejectedClosures);
             _coreFunctions = coreFunctions;
             _mode = options.CreateMode(coreFunctions);
             registerNative(coreFunctions);
@@ -78,7 +86,9 @@ public static class NativeHost
                 extension.Install();
             }
             _mode.Start();
-            Log("bootstrap", $"registered signal, run-script, and main-loop handlers; closure handler registered mode={options.ModeName}");
+            Log("bootstrap", $"registered signal, run-script, and main-loop handlers; closure handler registered mode={options.ModeName}" +
+                (options.FrameDelivery == FrameDelivery.ModuleClosure ? string.Empty : $" frames={options.FrameDelivery}") +
+                (options.RejectedClosures == RejectedClosureHandling.Throw ? string.Empty : $" rejected-closures={options.RejectedClosures}"));
         }
         catch (Exception exception)
         {
@@ -174,6 +184,14 @@ public static class NativeHost
     [UnmanagedCallersOnly]
     private static void OnMainLoop(ulong frame) => HandleMainLoop(frame);
 
+    /// <summary>
+    /// The main-loop callback: every extension's <see cref="INativeHostExtension.BeginFrame"/>, the closure-stack release
+    /// report, then the frame as <see cref="NativeHostOptions.FrameDelivery"/> says. A failure of an extension, of
+    /// <see cref="IHostMode.BeforeFrame"/> or of scheduling the frame closure goes to
+    /// <see cref="IHostMode.OnFrameScheduleFailure"/>; an inline frame's <see cref="IHostMode.RunFrame"/> failure goes to
+    /// <see cref="IHostMode.OnCallbackFailure"/> with the phase <c>main-loop</c>, as a module-closure frame's goes there
+    /// with the phase <c>closure</c>. Either way the next callback delivers the next frame.
+    /// </summary>
     internal static void HandleMainLoop(ulong frame)
     {
         try
@@ -185,9 +203,19 @@ public static class NativeHost
             ReportClosureStackReleaseFailures();
             var mode = _mode;
             var coreFunctions = _coreFunctions;
-            if (mode is null || coreFunctions is null ||
-                Volatile.Read(ref _destroyed) != 0 || Volatile.Read(ref _moduleFinished) == 0 ||
-                !mode.BeforeFrame())
+            if (mode is null || coreFunctions is null || Volatile.Read(ref _destroyed) != 0)
+            {
+                return;
+            }
+            if (_frameDelivery == FrameDelivery.Inline)
+            {
+                if (mode.BeforeFrame())
+                {
+                    RunInlineFrame(mode, coreFunctions, frame);
+                }
+                return;
+            }
+            if (Volatile.Read(ref _moduleFinished) == 0 || !mode.BeforeFrame())
             {
                 return;
             }
@@ -226,6 +254,26 @@ public static class NativeHost
             {
                 Log("failure", $"main-loop-schedule: {exception.GetType().Name}: {exception.Message}");
             }
+        }
+    }
+
+    // The frame runs in the script context NWNX pushed for the main-loop callback, so OBJECT_SELF is OBJECT_INVALID
+    // whatever scope the handler held, and a closure the frame schedules for OBJECT_SELF is refused as it was when the
+    // server registered its own main-loop handler.
+    private static void RunInlineFrame(IHostMode mode, CoreFunctionHandler coreFunctions, ulong frame)
+    {
+        var previous = coreFunctions.ExchangeObjectSelf(NWScript.OBJECT_INVALID);
+        try
+        {
+            mode.RunFrame(frame);
+        }
+        catch (Exception exception)
+        {
+            ReportCallbackFailure(InlineFramePhase, exception);
+        }
+        finally
+        {
+            coreFunctions.ExchangeObjectSelf(previous);
         }
     }
 
@@ -272,6 +320,7 @@ public static class NativeHost
         _mode = null;
         _extensions = [];
         _logPrefix = DefaultLogPrefix;
+        _frameDelivery = FrameDelivery.ModuleClosure;
         Volatile.Write(ref _bootstrapped, 0);
         Volatile.Write(ref _moduleFinished, 0);
         Volatile.Write(ref _destroyed, 0);

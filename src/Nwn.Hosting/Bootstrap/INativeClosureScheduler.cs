@@ -5,7 +5,8 @@ namespace Nwn.Hosting.Bootstrap;
 /// (<see cref="CoreFunctionHandler.Dispatch"/>). A <see cref="CoreFunctionHandler"/> uses NWNX DotNET unless it is
 /// given another scheduler; a test passes a recording one (<c>RecordingClosureScheduler</c> in
 /// <c>Nwn.Hosting.Testing</c>) to drive closures without a running server. Each method returns 0 when the engine
-/// refused the closure and any other value when it accepted it.
+/// refused the closure and any other value when it accepted it; <see cref="CoreFunctionHandler.RejectedClosureHandling"/>
+/// decides what a refusal does.
 /// </summary>
 public interface INativeClosureScheduler
 {

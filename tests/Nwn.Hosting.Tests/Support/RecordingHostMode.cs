@@ -9,6 +9,12 @@ internal sealed class RecordingHostMode(List<string> events) : IHostMode
 
     public Func<string>? ObserveOnStart { get; set; }
 
+    /// <summary>When set, <see cref="RunFrame"/> records its answer next to the frame number.</summary>
+    public Func<string>? ObserveOnRunFrame { get; set; }
+
+    /// <summary>When set, <see cref="RunFrame"/> throws it after recording the frame.</summary>
+    public Exception? RunFrameFailure { get; set; }
+
     public Exception? LastCallbackFailure { get; private set; }
 
     public Exception? LastFrameScheduleFailure { get; private set; }
@@ -23,7 +29,11 @@ internal sealed class RecordingHostMode(List<string> events) : IHostMode
         return RunsFrames;
     }
 
-    public void RunFrame(ulong frame) => events.Add($"mode.RunFrame:{frame}");
+    public void RunFrame(ulong frame)
+    {
+        events.Add($"mode.RunFrame:{frame}{(ObserveOnRunFrame is null ? string.Empty : $"[{ObserveOnRunFrame()}]")}");
+        if (RunFrameFailure is not null) throw RunFrameFailure;
+    }
 
     /// <summary>What <see cref="OnRunScript"/> answers; false (not handled) unless a test sets it.</summary>
     public bool HandlesScripts { get; set; }

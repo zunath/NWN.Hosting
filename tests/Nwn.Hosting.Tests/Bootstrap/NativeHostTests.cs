@@ -339,6 +339,214 @@ public sealed class NativeHostTests
         Assert.AreEqual(2, scheduler.Scheduled.Count, "The next frame must still be scheduled after a retirement.");
     }
 
+    [TestMethod]
+    public void Initialize_GivesTheModeAClosureHandlerWithTheConfiguredRejectedClosureHandling()
+    {
+        CoreFunctionHandler? byDefault = null;
+        NativeHost.Initialize(new NativeHostOptions(LogPrefix, "mode", core =>
+        {
+            byDefault = core;
+            return new RecordingHostMode(_events);
+        }), _ => { });
+        NativeHost.ResetForTest();
+        CoreFunctionHandler? dropping = null;
+        NativeHost.Initialize(new NativeHostOptions(LogPrefix, "mode", core =>
+        {
+            dropping = core;
+            return new RecordingHostMode(_events);
+        }) { RejectedClosures = RejectedClosureHandling.Drop }, _ => { });
+
+        Assert.AreEqual(RejectedClosureHandling.Throw, byDefault!.RejectedClosureHandling);
+        Assert.AreEqual(RejectedClosureHandling.Drop, dropping!.RejectedClosureHandling);
+    }
+
+    [TestMethod]
+    public void Initialize_NamesTheFrameDeliveryAndRejectedClosureHandlingInTheBootstrapLineWhenTheyAreNotTheDefaults()
+    {
+        NativeHost.Initialize(new NativeHostOptions(LogPrefix, "test-mode", _ => new RecordingHostMode(_events))
+        {
+            FrameDelivery = FrameDelivery.Inline,
+            RejectedClosures = RejectedClosureHandling.Drop,
+        }, _ => { });
+
+        Assert.AreEqual(
+            $"{LogPrefix} bootstrap registered signal, run-script, and main-loop handlers; closure handler registered mode=test-mode " +
+            $"frames=Inline rejected-closures=Drop{Environment.NewLine}",
+            _console.ToString());
+    }
+
+    [TestMethod]
+    public void InlineFrames_RunOnEveryCallbackFromTheFirst_WithoutTheModuleLoadGateOrAClosure()
+    {
+        var scheduler = new RecordingClosureScheduler();
+        CoreFunctionHandler? core = null;
+        var mode = new RecordingHostMode(_events) { RunsFrames = true };
+        NativeHost.Initialize(new NativeHostOptions(LogPrefix, "mode", created =>
+        {
+            core = created;
+            return mode;
+        }, [new RecordingNativeHostExtension("first", _events)]) { FrameDelivery = FrameDelivery.Inline }, _ => { }, scheduler);
+        _events.Clear();
+
+        NativeHost.HandleMainLoop(0);
+        NativeHost.HandleMainLoop(1);
+        NativeHost.HandleSignal(ModuleLoadFinish);
+        NativeHost.HandleMainLoop(2);
+
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                "first.BeginFrame", "mode.BeforeFrame", "mode.RunFrame:0",
+                "first.BeginFrame", "mode.BeforeFrame", "mode.RunFrame:1",
+                "first.OnModuleLoaded", $"mode.OnSignal:{ModuleLoadFinish}",
+                "first.BeginFrame", "mode.BeforeFrame", "mode.RunFrame:2",
+            },
+            _events,
+            "An inline frame runs inside the callback that delivers it, before the module has loaded as well.");
+        Assert.AreEqual(0, scheduler.Scheduled.Count, "Inline frames schedule no closure.");
+        Assert.AreEqual(0, core!.PendingCount);
+    }
+
+    [TestMethod]
+    public void InlineFrames_WhenBeforeFrameAnswersFalse_SkipThatFrameOnly()
+    {
+        var mode = new RecordingHostMode(_events) { RunsFrames = false };
+        NativeHost.Initialize(new NativeHostOptions(LogPrefix, "mode", _ => mode) { FrameDelivery = FrameDelivery.Inline }, _ => { });
+        _events.Clear();
+
+        NativeHost.HandleMainLoop(0);
+        mode.RunsFrames = true;
+        NativeHost.HandleMainLoop(1);
+
+        CollectionAssert.AreEqual(new[] { "mode.BeforeFrame", "mode.BeforeFrame", "mode.RunFrame:1" }, _events);
+    }
+
+    [TestMethod]
+    public void InlineFrames_RunWithObjectSelfInvalid_AndRestoreTheObjectSelfAroundThem()
+    {
+        CoreFunctionHandler? core = null;
+        var mode = new RecordingHostMode(_events) { RunsFrames = true };
+        mode.ObserveOnRunFrame = () => $"0x{core!.ObjectSelf:X8}";
+        NativeHost.Initialize(new NativeHostOptions(LogPrefix, "mode", created =>
+        {
+            core = created;
+            return mode;
+        }) { FrameDelivery = FrameDelivery.Inline }, _ => { });
+        _events.Clear();
+
+        NativeHost.HandleMainLoop(0);
+        uint afterFrame;
+        using (core!.EnterObjectSelf(Creature))
+        {
+            NativeHost.HandleMainLoop(1);
+            afterFrame = core.ObjectSelf;
+        }
+
+        var invalid = $"0x{NWN.Core.NWScript.OBJECT_INVALID:X8}";
+        CollectionAssert.AreEqual(
+            new[] { "mode.BeforeFrame", $"mode.RunFrame:0[{invalid}]", "mode.BeforeFrame", $"mode.RunFrame:1[{invalid}]" },
+            _events,
+            "An inline frame runs in NWNX's main-loop script context, whose OBJECT_SELF is OBJECT_INVALID.");
+        Assert.AreEqual(Creature, afterFrame, "The frame must hand back the OBJECT_SELF it found.");
+    }
+
+    [TestMethod]
+    public void ModuleClosureFrames_StillRunAsTheModule()
+    {
+        var scheduler = new RecordingClosureScheduler();
+        CoreFunctionHandler? core = null;
+        var mode = new RecordingHostMode(_events) { RunsFrames = true };
+        mode.ObserveOnRunFrame = () => $"0x{core!.ObjectSelf:X8}";
+        NativeHost.Initialize(new NativeHostOptions(LogPrefix, "mode", created =>
+        {
+            core = created;
+            return mode;
+        }), _ => { }, scheduler);
+        NativeHost.HandleSignal(ModuleLoadFinish);
+        _events.Clear();
+
+        NativeHost.HandleMainLoop(4);
+        var frame = scheduler.Scheduled.Single();
+        core!.Dispatch(frame.EventId, frame.Object);
+
+        CollectionAssert.AreEqual(new[] { "mode.BeforeFrame", $"mode.RunFrame:4[0x{NativeHost.ModuleObject:X8}]" }, _events);
+    }
+
+    [TestMethod]
+    public void InlineFrames_AFailedFrameIsReportedAsAMainLoopCallbackFailure_AndTheNextFrameStillRuns()
+    {
+        var failure = new InvalidOperationException("frame failed");
+        var mode = new RecordingHostMode(_events) { RunsFrames = true, RunFrameFailure = failure };
+        NativeHost.Initialize(new NativeHostOptions(LogPrefix, "mode", _ => mode) { FrameDelivery = FrameDelivery.Inline }, _ => { });
+        _events.Clear();
+
+        NativeHost.HandleMainLoop(3);
+        mode.RunFrameFailure = null;
+        NativeHost.HandleMainLoop(4);
+
+        CollectionAssert.AreEqual(
+            new[] { "mode.BeforeFrame", "mode.RunFrame:3", "mode.OnCallbackFailure:main-loop", "mode.BeforeFrame", "mode.RunFrame:4" },
+            _events);
+        Assert.AreSame(failure, mode.LastCallbackFailure);
+        Assert.AreEqual("main-loop", mode.CallbackFailurePhase);
+        Assert.IsNull(mode.LastFrameScheduleFailure);
+    }
+
+    [TestMethod]
+    public void InlineFrames_AFailedExtensionFrameStartIsStillAScheduleFailure_AndSkipsTheFrame()
+    {
+        var failure = new InvalidOperationException("frame hook failed");
+        var mode = new RecordingHostMode(_events) { RunsFrames = true };
+        NativeHost.Initialize(new NativeHostOptions(LogPrefix, "mode", _ => mode,
+            [new RecordingNativeHostExtension("broken", _events) { BeginFrameFailure = failure }]) { FrameDelivery = FrameDelivery.Inline }, _ => { });
+        _events.Clear();
+
+        NativeHost.HandleMainLoop(0);
+
+        CollectionAssert.AreEqual(new[] { "broken.BeginFrame", "mode.OnFrameScheduleFailure" }, _events);
+        Assert.AreSame(failure, mode.LastFrameScheduleFailure);
+    }
+
+    [TestMethod]
+    public void InlineFrames_StopOnceTheServerIsDestroyed()
+    {
+        var mode = new RecordingHostMode(_events) { RunsFrames = true };
+        NativeHost.Initialize(new NativeHostOptions(LogPrefix, "mode", _ => mode) { FrameDelivery = FrameDelivery.Inline }, _ => { });
+        _events.Clear();
+
+        NativeHost.HandleSignal(DestroyServer);
+        NativeHost.HandleMainLoop(8);
+
+        CollectionAssert.AreEqual(new[] { "mode.OnDestroyServer" }, _events);
+    }
+
+    [TestMethod]
+    public void UnderDrop_ARefusedFrameClosureIsStillAScheduleFailure_AndTheNextFrameIsScheduled()
+    {
+        var scheduler = new RecordingClosureScheduler { Refuse = true };
+        CoreFunctionHandler? core = null;
+        var mode = new RecordingHostMode(_events) { RunsFrames = true };
+        NativeHost.Initialize(new NativeHostOptions(LogPrefix, "mode", created =>
+        {
+            core = created;
+            return mode;
+        }) { RejectedClosures = RejectedClosureHandling.Drop }, _ => { }, scheduler);
+        NativeHost.HandleSignal(ModuleLoadFinish);
+        _events.Clear();
+
+        NativeHost.HandleMainLoop(1);
+        scheduler.Refuse = false;
+        NativeHost.HandleMainLoop(2);
+        var frame = scheduler.Scheduled.Single();
+        core!.Dispatch(frame.EventId, frame.Object);
+
+        CollectionAssert.AreEqual(
+            new[] { "mode.BeforeFrame", "mode.OnFrameScheduleFailure", "mode.BeforeFrame", "mode.RunFrame:2" },
+            _events,
+            "Dropping the host's frame closure silently would stop every later frame.");
+        Assert.AreEqual(1, core.RejectedClosureCount);
+    }
+
     private static int RunScript(string script)
     {
         var pointer = Marshal.StringToCoTaskMemUTF8(script);
